@@ -123,6 +123,40 @@ class QuestLineDatabaseTest {
         assertNull(database.get(null));
     }
 
+    @Test
+    void removeQuestToleratesNullLinesAndStillClearsOthers() {
+        // Upstream dereferences every value here, so a supported null line crashes it. This port guards instead.
+        QuestLineDatabase database = threeLines();
+        UUID questId = UUID.fromString("40000000-0000-0000-0000-000000000004");
+        database.get(FIRST).put(questId, new QuestLineEntry(0, 0));
+        database.get(SECOND).put(questId, new QuestLineEntry(1, 1));
+        database.put(THIRD, null);
+
+        database.removeQuest(questId);
+
+        assertFalse(database.get(FIRST).containsKey(questId));
+        assertFalse(database.get(SECOND).containsKey(questId));
+    }
+
+    @Test
+    void entriesWithoutAnyIdGetFreshKeysAndDropTheirStoredOrder() {
+        // Deliberate divergence: upstream caches null into the order map for these entries, which corrupts
+        // every later index lookup. Such entries get a generated UUID, so their original order is meaningless.
+        QuestLineDatabase database = new QuestLineDatabase();
+        NBTTagList serialized = new NBTTagList();
+        NBTTagCompound withoutId = new NBTTagCompound();
+        withoutId.setInteger("order", 0);
+        serialized.appendTag(withoutId);
+        serialized.appendTag(lineTag(FIRST, 1));
+
+        database.readFromNBT(serialized, false);
+
+        assertEquals(2, database.size());
+        assertTrue(database.containsKey(FIRST));
+        assertFalse(database.lineOrder.contains(null));
+        assertEquals(List.of(FIRST), database.lineOrder);
+    }
+
     private static QuestLineDatabase threeLines() {
         QuestLineDatabase database = new QuestLineDatabase();
         database.createNew(FIRST);

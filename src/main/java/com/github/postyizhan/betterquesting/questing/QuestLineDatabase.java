@@ -38,7 +38,13 @@ public class QuestLineDatabase extends UuidDatabase<IQuestLine> implements IQues
 
     @Override
     public void removeQuest(UUID questId) {
-        values().forEach(line -> line.remove(questId));
+        // Null lines are a supported map state here, so guard the dereference. Upstream lacks this guard and
+        // throws NullPointerException whenever a null line is present.
+        values().forEach(line -> {
+            if (line != null) {
+                line.remove(questId);
+            }
+        });
     }
 
     @Override

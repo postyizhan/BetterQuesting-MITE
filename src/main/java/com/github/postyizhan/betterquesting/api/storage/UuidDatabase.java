@@ -17,17 +17,27 @@ import java.util.stream.Stream;
 
 public class UuidDatabase<T> extends AbstractMap<UUID, T> implements IUuidDatabase<T> {
     private final Map<UUID, T> database = new HashMap<>();
+    private final Map<T, UUID> reverseDatabase = new HashMap<>();
+    private final IBiMap<T, UUID> inverseView = new InverseView();
 
     /*
-     * Identity equality, deliberately diverging from the Map contract.
+     * Identity equality, matching upstream and deliberately asymmetric with respect to Map.equals.
      *
-     * Upstream UuidDatabase implements IUuidDatabase directly and delegates to a HashBiMap field, so it
-     * inherits Object identity equality. This port extends AbstractMap to reuse its view plumbing, which
-     * would otherwise supply structural equality. The difference is not cosmetic: subclasses such as
-     * QuestLine are themselves stored as values inside another UuidDatabase, and this class enforces value
-     * uniqueness. Under structural equality two independently created empty quest lines compare equal, so
-     * inserting the second one would be rejected as a duplicate value. Identity equality restores upstream
-     * behaviour for every subclass.
+     * Upstream IUuidDatabase extends Guava's BiMap, which extends Map, and neither upstream UuidDatabase nor
+     * upstream QuestLine overrides equals/hashCode. Both therefore behave as Maps that use Object identity
+     * equality. This port reproduces that behaviour here rather than in each subclass.
+     *
+     * Why it matters: subclasses such as QuestLine are stored as values inside another UuidDatabase, and this
+     * class enforces value uniqueness. This port extends AbstractMap to reuse its view plumbing, so without
+     * this override two independently created empty quest lines would compare structurally equal and the
+     * second insertion would be rejected as a duplicate value. UuidDatabaseTest pins that invariant.
+     *
+     * Known consequence, inherited from upstream rather than introduced here: equality is asymmetric against
+     * other Map implementations. Verified empirically on this port - for a structurally identical HashMap,
+     * db.equals(hashMap) is false while hashMap.equals(db) is true, because AbstractMap.equals compares
+     * entrySet(). The same asymmetry is present upstream for both UuidDatabase and QuestLine. Consumers must
+     * therefore never use Map.equals to decide whether a database changed; stage 3 dirty-tracking and stage 4
+     * caching must compare explicit content or versions instead.
      */
     @Override
     public boolean equals(Object other) {
@@ -38,8 +48,6 @@ public class UuidDatabase<T> extends AbstractMap<UUID, T> implements IUuidDataba
     public int hashCode() {
         return System.identityHashCode(this);
     }
-    private final Map<T, UUID> reverseDatabase = new HashMap<>();
-    private final IBiMap<T, UUID> inverseView = new InverseView();
 
     private int compareEntries(Map.Entry<UUID, T> first, Map.Entry<UUID, T> second) {
         return UuidConverter.encodeUuid(first.getKey()).compareTo(UuidConverter.encodeUuid(second.getKey()));
