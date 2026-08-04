@@ -17,6 +17,27 @@ import java.util.stream.Stream;
 
 public class UuidDatabase<T> extends AbstractMap<UUID, T> implements IUuidDatabase<T> {
     private final Map<UUID, T> database = new HashMap<>();
+
+    /*
+     * Identity equality, deliberately diverging from the Map contract.
+     *
+     * Upstream UuidDatabase implements IUuidDatabase directly and delegates to a HashBiMap field, so it
+     * inherits Object identity equality. This port extends AbstractMap to reuse its view plumbing, which
+     * would otherwise supply structural equality. The difference is not cosmetic: subclasses such as
+     * QuestLine are themselves stored as values inside another UuidDatabase, and this class enforces value
+     * uniqueness. Under structural equality two independently created empty quest lines compare equal, so
+     * inserting the second one would be rejected as a duplicate value. Identity equality restores upstream
+     * behaviour for every subclass.
+     */
+    @Override
+    public boolean equals(Object other) {
+        return this == other;
+    }
+
+    @Override
+    public int hashCode() {
+        return System.identityHashCode(this);
+    }
     private final Map<T, UUID> reverseDatabase = new HashMap<>();
     private final IBiMap<T, UUID> inverseView = new InverseView();
 

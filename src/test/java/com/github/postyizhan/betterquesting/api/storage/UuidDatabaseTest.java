@@ -2,6 +2,7 @@ package com.github.postyizhan.betterquesting.api.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -290,5 +291,25 @@ class UuidDatabaseTest {
         assertTrue(iterator.hasNext());
         iterator.next();
         assertThrows(UnsupportedOperationException.class, iterator::remove);
+    }
+
+    @Test
+    void usesIdentityEqualitySoStructurallyEqualDatabasesCanCoexistAsValues() {
+        // Upstream UuidDatabase delegates to a HashBiMap field and inherits Object identity equality.
+        // This port extends AbstractMap, whose structural equality would make two empty databases equal and
+        // therefore collide under value uniqueness when nested inside another database.
+        UuidDatabase<String> first = new UuidDatabase<>();
+        UuidDatabase<String> second = new UuidDatabase<>();
+
+        assertNotEquals(first, second);
+        assertEquals(first, first);
+
+        UuidDatabase<UuidDatabase<String>> parent = new UuidDatabase<>();
+        parent.put(FIRST, first);
+        parent.put(SECOND, second);
+
+        assertEquals(2, parent.size());
+        assertSame(first, parent.get(FIRST));
+        assertSame(second, parent.get(SECOND));
     }
 }
