@@ -45,6 +45,7 @@ dependencies {
 
     // The most basic dependency library mod, with a status similar to Fabric API
     implementation "com.github.MinecraftIsTooEasy:RustedIronCore:1.5.0"
+    implementation "com.github.MinecraftIsTooEasy:ManyLib:2.3.1"
 
     // To add strong dependencies, use "implementation" like above
     // To compile mod integrations(e.g. ModMenu), use "compileOnly"
@@ -54,12 +55,12 @@ dependencies {
 def fmlResolvedFile = configurations.fml.files.iterator().next()
 
 loom {
-    accessWidenerPath = file("src/main/resources/modid.accesswidener")
+    accessWidenerPath = file("src/main/resources/betterquesting.accesswidener")
     mergedMinecraftJar()
     setFML(fmlResolvedFile)
     dependencies.add("mappings", fmlMCPMappings())
     mods {
-        "modid" {
+        "betterquesting" {
             sourceSet sourceSets.main
 //            sourceSet sourceSets.client
 //            sourceSet sourceSets.server
@@ -73,9 +74,8 @@ loom {
             String height = project.screen_height
             programArgs "--userProperties", "{}", "--username", name, "--session", "a.a.a.a", "--width", width, "--height", height
         }
-//        server {
-//            programArgs "--", ""
-//        }
+        server {
+        }
     }
 }
 

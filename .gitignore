@@ -32,6 +32,10 @@ bin/
 
 run/
 
+# pi subagents 运行产物，仅本地调试用
+
+.pi-subagents/
+
 # java
 
 hs_err_*.log
