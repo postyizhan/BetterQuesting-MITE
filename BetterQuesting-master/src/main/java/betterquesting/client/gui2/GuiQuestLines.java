@@ -1,0 +1,1320 @@
+package betterquesting.client.gui2;
+
+import static betterquesting.api.storage.BQ_Settings.alwaysDrawImplicit;
+import static betterquesting.api.storage.BQ_Settings.forceMonochromeText;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.FontRenderer;
+import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.util.ChatComponentText;
+import net.minecraft.util.EnumChatFormatting;
+import net.minecraftforge.common.config.Configuration;
+import net.minecraftforge.common.config.Property;
+
+import org.apache.commons.lang3.tuple.Pair;
+import org.lwjgl.util.vector.Vector4f;
+
+import com.google.common.collect.ImmutableList;
+
+import betterquesting.api.api.ApiReference;
+import betterquesting.api.api.QuestingAPI;
+import betterquesting.api.client.gui.misc.INeedsRefresh;
+import betterquesting.api.enums.EnumLogic;
+import betterquesting.api.enums.EnumQuestVisibility;
+import betterquesting.api.properties.NativeProps;
+import betterquesting.api.questing.IQuest;
+import betterquesting.api.questing.IQuestLine;
+import betterquesting.api.questing.IQuestLineEntry;
+import betterquesting.api.questing.rewards.IReward;
+import betterquesting.api.storage.BQ_Settings;
+import betterquesting.api.utils.RenderUtils;
+import betterquesting.api.utils.UuidConverter;
+import betterquesting.api2.cache.QuestCache;
+import betterquesting.api2.client.gui.GuiScreenCanvas;
+import betterquesting.api2.client.gui.context.IQuestContextMenuEntry;
+import betterquesting.api2.client.gui.context.QuestContextMenuRegistry;
+import betterquesting.api2.client.gui.controls.IPanelButton;
+import betterquesting.api2.client.gui.controls.PanelButton;
+import betterquesting.api2.client.gui.controls.PanelButtonQuest;
+import betterquesting.api2.client.gui.controls.PanelButtonStorage;
+import betterquesting.api2.client.gui.events.IPEventListener;
+import betterquesting.api2.client.gui.events.PEventBroadcaster;
+import betterquesting.api2.client.gui.events.PanelEvent;
+import betterquesting.api2.client.gui.events.types.PEventButton;
+import betterquesting.api2.client.gui.misc.GuiAlign;
+import betterquesting.api2.client.gui.misc.GuiPadding;
+import betterquesting.api2.client.gui.misc.GuiRectangle;
+import betterquesting.api2.client.gui.misc.GuiTransform;
+import betterquesting.api2.client.gui.panels.CanvasEmpty;
+import betterquesting.api2.client.gui.panels.CanvasTextured;
+import betterquesting.api2.client.gui.panels.bars.PanelVScrollBar;
+import betterquesting.api2.client.gui.panels.content.PanelGeneric;
+import betterquesting.api2.client.gui.panels.content.PanelTextBox;
+import betterquesting.api2.client.gui.panels.lists.CanvasHoverTray;
+import betterquesting.api2.client.gui.panels.lists.CanvasQuestLine;
+import betterquesting.api2.client.gui.panels.lists.CanvasScrolling;
+import betterquesting.api2.client.gui.popups.PopChoiceExt;
+import betterquesting.api2.client.gui.popups.PopContextMenuHoverSub;
+import betterquesting.api2.client.gui.resources.colors.GuiColorPulse;
+import betterquesting.api2.client.gui.resources.colors.GuiColorStatic;
+import betterquesting.api2.client.gui.resources.textures.GuiTextureColored;
+import betterquesting.api2.client.gui.resources.textures.OreDictTexture;
+import betterquesting.api2.client.gui.themes.presets.PresetColor;
+import betterquesting.api2.client.gui.themes.presets.PresetIcon;
+import betterquesting.api2.client.gui.themes.presets.PresetTexture;
+import betterquesting.api2.storage.DBEntry;
+import betterquesting.api2.utils.QuestTranslation;
+import betterquesting.api2.utils.Tuple2;
+import betterquesting.client.BookmarkHandler;
+import betterquesting.client.gui2.editors.GuiQuestLinesEditor;
+import betterquesting.client.gui2.editors.designer.GuiDesigner;
+import betterquesting.core.BetterQuesting;
+import betterquesting.handlers.ConfigHandler;
+import betterquesting.network.handlers.NetQuestAction;
+import betterquesting.questing.QuestDatabase;
+import betterquesting.questing.QuestLineDatabase;
+import bq_standard.rewards.RewardChoice;
+
+public class GuiQuestLines extends GuiScreenCanvas implements IPEventListener, INeedsRefresh {
+
+    private ScrollPosition scrollPosition;
+
+    public static class ScrollPosition {
+
+        public ScrollPosition(int chapterScrollY) {
+            this.chapterScrollY = chapterScrollY;
+        }
+
+        private int chapterScrollY;
+
+        public int getChapterScrollY() {
+            return chapterScrollY;
+        }
+
+        public void setChapterScrollY(int chapterScrollY) {
+            this.chapterScrollY = chapterScrollY;
+        }
+    }
+
+    private IQuestLine selectedLine = null;
+    private static UUID selectedLineId = null;
+
+    private final List<Tuple2<Map.Entry<UUID, IQuestLine>, Integer>> visChapters = new ArrayList<>();
+
+    private CanvasQuestLine cvQuest;
+
+    // Keep these separate for now
+    private CanvasHoverTray cvChapterTray;
+    private CanvasHoverTray cvDescTray;
+    private CanvasHoverTray cvFrame;
+
+    private CanvasScrolling cvDesc;
+    private PanelVScrollBar scDesc;
+    private CanvasScrolling cvLines;
+    private PanelVScrollBar scLines;
+
+    private PanelGeneric icoChapter;
+    private PanelTextBox txTitle;
+    private PanelTextBox txDesc;
+    private PanelTextBox completionText;
+    private PanelTextBox txGlobalCompletion;
+
+    private PanelButton claimAll;
+
+    private static boolean trayLock;
+    private static boolean viewMode;
+    private int questsCompleted = 0;
+    private int totalQuests = 0;
+    private int globalQuestsCompleted = 0;
+    private int globalTotalQuests = 0;
+
+    private GuiQuestSearch searchGui;
+    private GuiBookmarks bookmarksGui;
+
+    private final List<PanelButtonStorage<Map.Entry<UUID, IQuestLine>>> btnListRef = new ArrayList<>();
+    private final List<Integer> btnVisibilityRef = new ArrayList<>();
+
+    public GuiQuestLines(GuiScreen parent) {
+        super(parent);
+        trayLock = BQ_Settings.lockTray;
+        viewMode = BQ_Settings.viewMode;
+
+        if (scrollPosition == null) {
+            scrollPosition = new ScrollPosition(0);
+        }
+    }
+
+    @Override
+    public void refreshGui() {
+        refreshChapterVisibility();
+        refreshContent();
+    }
+
+    @Override
+    public void initPanel() {
+        super.initPanel();
+
+        GuiHome.bookmark = this;
+        // If we come to quests gui - we set skip home to true
+        if (!BQ_Settings.skipHome) {
+            ConfigHandler.config.get(Configuration.CATEGORY_GENERAL, "Skip home", false)
+                .set(true);
+            ConfigHandler.config.save();
+            BQ_Settings.skipHome = true;
+        }
+
+        if (selectedLineId != null) {
+            selectedLine = QuestLineDatabase.INSTANCE.get(selectedLineId);
+            if (selectedLine == null) {
+                selectedLineId = null;
+            }
+        } else {
+            selectedLine = null;
+        }
+
+        boolean firstQuestView = selectedLineId == null && !hasCompletedQuest() && selectFirstQuestLine();
+
+        boolean canEdit = QuestingAPI.getAPI(ApiReference.SETTINGS)
+            .canUserEdit(mc.thePlayer);
+        boolean preOpen = trayLock || firstQuestView;
+
+        PEventBroadcaster.INSTANCE.register(this, PEventButton.class);
+
+        CanvasTextured cvBackground = new CanvasTextured(
+            new GuiTransform(GuiAlign.FULL_BOX, new GuiPadding(0, 0, 0, 0), 0),
+            PresetTexture.PANEL_MAIN.getTexture());
+        this.addPanel(cvBackground);
+
+        PanelButton btnExit = new PanelButton(new GuiTransform(GuiAlign.BOTTOM_LEFT, 8, -24, 32, 16, 0), -1, "")
+            .setIcon(PresetIcon.ICON_PG_PREV.getTexture());
+        btnExit.setClickAction((b) -> displayParent());
+        btnExit.setTooltip(Collections.singletonList(QuestTranslation.translate("gui.back")));
+        cvBackground.addPanel(btnExit);
+
+        // Search button
+        if (this.searchGui == null) this.searchGui = initSearchPanel();
+        PanelButton btnSearch = new PanelButton(new GuiTransform(GuiAlign.BOTTOM_LEFT, 8, -40, 32, 16, 0), -1, "")
+            .setIcon(PresetIcon.ICON_ZOOM.getTexture());
+        btnSearch.setClickAction((button) -> { mc.displayGuiScreen(this.searchGui); });
+        btnSearch.setTooltip(Collections.singletonList(QuestTranslation.translate("betterquesting.gui.search")));
+        cvBackground.addPanel(btnSearch);
+
+        // Pins button
+        if (this.bookmarksGui == null) this.bookmarksGui = initBookmarksPanel();
+        PanelButton btnBookmarks = new PanelButton(new GuiTransform(GuiAlign.BOTTOM_LEFT, 8, -56, 32, 16, 0), -1, "")
+            .setIcon(PresetIcon.ICON_BOOKMARK.getTexture());
+        btnBookmarks.setClickAction((button) -> { mc.displayGuiScreen(this.bookmarksGui); });
+        btnBookmarks.setTooltip(Collections.singletonList(QuestTranslation.translate("betterquesting.gui.bookmarks")));
+        cvBackground.addPanel(btnBookmarks);
+
+        if (canEdit) {
+            PanelButton btnEdit = new PanelButton(new GuiTransform(GuiAlign.BOTTOM_LEFT, 8, -72, 16, 16, 0), -1, "")
+                .setIcon(PresetIcon.ICON_GEAR.getTexture());
+            btnEdit.setClickAction((b) -> mc.displayGuiScreen(new GuiQuestLinesEditor(this)));
+            btnEdit.setTooltip(Collections.singletonList(QuestTranslation.translate("betterquesting.btn.edit")));
+            cvBackground.addPanel(btnEdit);
+
+            PanelButton btnDesign = new PanelButton(new GuiTransform(GuiAlign.BOTTOM_LEFT, 24, -72, 16, 16, 0), -1, "")
+                .setIcon(PresetIcon.ICON_SORT.getTexture());
+            btnDesign.setClickAction(
+                (b) -> { if (selectedLine != null) mc.displayGuiScreen(new GuiDesigner(this, selectedLine)); });
+            btnDesign.setTooltip(Collections.singletonList(QuestTranslation.translate("betterquesting.btn.designer")));
+            cvBackground.addPanel(btnDesign);
+        }
+
+        // Notification settings entry. Tinted yellow as a "needs a look" hint until first opened.
+        int notifY = canEdit ? -88 : -72;
+        PanelButton btnNotif = new PanelButton(new GuiTransform(GuiAlign.BOTTOM_LEFT, 8, notifY, 32, 16, 0), -1, "");
+        if (BQ_Settings.notificationHintSeen) {
+            btnNotif.setIcon(PresetIcon.ICON_NOTICE.getTexture());
+        } else {
+            btnNotif.setIcon(PresetIcon.ICON_NOTICE.getTexture(), new GuiColorStatic(0xFFFFCC00), 0);
+        }
+        btnNotif.setClickAction((b) -> mc.displayGuiScreen(new GuiNotificationSettings(this)));
+        btnNotif
+            .setTooltip(Collections.singletonList(QuestTranslation.translate("betterquesting.notification.settings")));
+        cvBackground.addPanel(btnNotif);
+
+        txTitle = new PanelTextBox(
+            new GuiTransform(new Vector4f(0F, 0F, 0.5F, 0F), new GuiPadding(60, 12, 0, -24), 0),
+            "");
+        txTitle.setColor(PresetColor.TEXT_HEADER.getColor());
+        cvBackground.addPanel(txTitle);
+
+        completionText = new PanelTextBox(
+            new GuiTransform(new Vector4f(0F, 0F, 0.5F, 0F), new GuiPadding(214, 12, -154, -24), 0),
+            "");
+        completionText.setColor(PresetColor.TEXT_HEADER.getColor());
+        cvBackground.addPanel(completionText);
+
+        icoChapter = new PanelGeneric(new GuiTransform(GuiAlign.TOP_LEFT, 40, 8, 16, 16, 0), null);
+        cvBackground.addPanel(icoChapter);
+
+        cvFrame = new CanvasHoverTray(
+            new GuiTransform(GuiAlign.FULL_BOX, new GuiPadding(40 + 150 + 24, 24, 8, 8), 0),
+            new GuiTransform(GuiAlign.FULL_BOX, new GuiPadding(40, 24, 8, 8), 0),
+            PresetTexture.AUX_FRAME_0.getTexture());
+        cvFrame.setManualOpen(true);
+        // CanvasTextured cvFrame = new CanvasTextured(new GuiTransform(GuiAlign.FULL_BOX, new GuiPadding(40, 24, 8, 8),
+        // 0), PresetTexture.AUX_FRAME_0.getTexture());
+        cvBackground.addPanel(cvFrame);
+        cvFrame.setTrayState(!preOpen, 1);
+        // These would probably be more annoying than useful if you just wanted to check a tray but not lose your
+        // position
+        // cvFrame.setOpenAction(() -> cvQuest.fitToWindow());
+        // cvFrame.setCloseAction(() -> cvQuest.fitToWindow());
+
+        // === TRAY STATE ===
+
+        boolean descTrayOpened = !firstQuestView && trayLock && cvDescTray != null && cvDescTray.isTrayOpen();
+        boolean chapterTrayOpened = firstQuestView || (preOpen && !descTrayOpened);
+
+        // === CHAPTER TRAY ===
+
+        cvChapterTray = new CanvasHoverTray(
+            new GuiTransform(GuiAlign.LEFT_EDGE, new GuiPadding(40, 24, -24, 8), -1),
+            new GuiTransform(GuiAlign.LEFT_EDGE, new GuiPadding(40, 24, -40 - 150 - 24, 8), -1),
+            PresetTexture.PANEL_INNER.getTexture());
+        cvChapterTray.setManualOpen(true);
+        cvChapterTray.setOpenAction(() -> {
+            cvDescTray.setTrayState(false, 200);
+            cvFrame.setTrayState(false, 200);
+            buildChapterList();
+        });
+        cvBackground.addPanel(cvChapterTray);
+
+        cvLines = new CanvasScrolling(new GuiTransform(GuiAlign.FULL_BOX, new GuiPadding(8, 20, 16, 8), 0));
+        cvChapterTray.getCanvasOpen()
+            .addPanel(cvLines);
+
+        txGlobalCompletion = new PanelTextBox(
+            new GuiTransform(new Vector4f(0F, 0F, 1F, 0F), new GuiPadding(8, 8, 16, -20), 0),
+            "");
+        txGlobalCompletion.setColor(PresetColor.TEXT_HEADER.getColor());
+        cvChapterTray.getCanvasOpen()
+            .addPanel(txGlobalCompletion);
+
+        scLines = new PanelVScrollBar(new GuiTransform(GuiAlign.RIGHT_EDGE, new GuiPadding(-16, 8, 8, 8), 0));
+        cvLines.setScrollDriverY(scLines);
+        cvChapterTray.getCanvasOpen()
+            .addPanel(scLines);
+
+        final PanelButton btnTrayLock = new PanelButton(
+            new GuiTransform(GuiAlign.TOP_RIGHT, -36, 3, 16, 16, -2),
+            -1,
+            "").setTextures(null, null, null);
+        final Runnable updateTrayLockButton = () -> {
+            btnTrayLock.setIcon(trayLock ? PresetIcon.ICON_LOCKED.getTexture() : PresetIcon.ICON_UNLOCKED.getTexture());
+            btnTrayLock.setTooltip(
+                Arrays.asList(
+                    QuestTranslation.translate("betterquesting.btn.lock_tray"),
+                    QuestTranslation.translate("betterquesting.tooltip.lock_tray." + trayLock)));
+        };
+        updateTrayLockButton.run();
+        btnTrayLock.setClickAction((b) -> {
+            trayLock = !trayLock;
+            ConfigHandler.config.get(Configuration.CATEGORY_GENERAL, "Lock tray", false)
+                .set(trayLock);
+            ConfigHandler.config.save();
+            ConfigHandler.initConfigs();
+            updateTrayLockButton.run();
+        });
+        cvChapterTray.getCanvasOpen()
+            .addPanel(btnTrayLock);
+
+        // === DESCRIPTION TRAY ===
+
+        cvDescTray = new CanvasHoverTray(
+            new GuiTransform(GuiAlign.LEFT_EDGE, new GuiPadding(40, 24, -24, 8), -1),
+            new GuiTransform(GuiAlign.LEFT_EDGE, new GuiPadding(40, 24, -40 - 150 - 24, 8), -1),
+            PresetTexture.PANEL_INNER.getTexture());
+        cvDescTray.setManualOpen(true);
+        cvDescTray.setOpenAction(() -> {
+            cvChapterTray.setTrayState(false, 200);
+            cvFrame.setTrayState(false, 200);
+            cvDesc.resetCanvas();
+            if (selectedLine != null) {
+                txDesc = new PanelTextBox(
+                    new GuiRectangle(
+                        0,
+                        0,
+                        cvDesc.getTransform()
+                            .getWidth(),
+                        0,
+                        0),
+                    QuestTranslation.translateQuestLineDescription(selectedLineId, selectedLine),
+                    true);
+                txDesc.setColor(PresetColor.TEXT_AUX_0.getColor());// .setFontSize(10);
+                cvDesc.addCulledPanel(txDesc, false);
+                cvDesc.refreshScrollBounds();
+                scDesc.setEnabled(
+                    cvDesc.getScrollBounds()
+                        .getHeight() > 0);
+            } else {
+                scDesc.setEnabled(false);
+            }
+        });
+        cvBackground.addPanel(cvDescTray);
+
+        cvDesc = new CanvasScrolling(new GuiTransform(GuiAlign.FULL_BOX, new GuiPadding(8, 8, 20, 8), 0));
+        cvDescTray.getCanvasOpen()
+            .addPanel(cvDesc);
+
+        scDesc = new PanelVScrollBar(new GuiTransform(GuiAlign.RIGHT_EDGE, new GuiPadding(-16, 8, 8, 8), 0));
+        cvDesc.setScrollDriverY(scDesc);
+        cvDescTray.getCanvasOpen()
+            .addPanel(scDesc);
+
+        // === LEFT SIDEBAR ===
+        int yOff = 24;
+        PanelButton btnTrayToggle = new PanelButton(new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, 0), -1, "");
+        btnTrayToggle.setIcon(
+            PresetIcon.ICON_QUEST.getTexture(),
+            selectedLineId == null && !chapterTrayOpened ? new GuiColorPulse(0xFFFFFFFF, 0xFF444444, 2F, 0F)
+                : new GuiColorStatic(0xFFFFFFFF),
+            0);
+        btnTrayToggle.setClickAction((b) -> {
+            cvFrame.setTrayState(cvChapterTray.isTrayOpen(), 200);
+            cvChapterTray.setTrayState(!cvChapterTray.isTrayOpen(), 200);
+            btnTrayToggle.setIcon(PresetIcon.ICON_QUEST.getTexture());
+        });
+        btnTrayToggle
+            .setTooltip(Collections.singletonList(QuestTranslation.translate("betterquesting.title.quest_lines")));
+        cvBackground.addPanel(btnTrayToggle);
+        yOff += 16;
+
+        PanelButton btnDescToggle = new PanelButton(new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, 0), -1, "")
+            .setIcon(PresetIcon.ICON_DESC.getTexture());
+        btnDescToggle.setClickAction((b) -> {
+            cvFrame.setTrayState(cvDescTray.isTrayOpen(), 200);
+            cvDescTray.setTrayState(!cvDescTray.isTrayOpen(), 200);
+        });
+        btnDescToggle
+            .setTooltip(Collections.singletonList(QuestTranslation.translate("betterquesting.gui.description")));
+        cvBackground.addPanel(btnDescToggle);
+        yOff += 16;
+
+        claimAll = new PanelButton(new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, -2), -1, "");
+        claimAll.setIcon(PresetIcon.ICON_CHEST_ALL.getTexture());
+        claimAll.setClickAction((b) -> {
+            Pair<List<UUID>, Integer> data = getAllPossibleClaims();
+            List<UUID> claimIdList = data != null ? data.getLeft() : null;
+            int numChoiceQuests = data != null ? data.getRight() : 0;
+
+            if (BQ_Settings.claimAllConfirmation || isShiftKeyDown()) {
+                PopChoiceExt popup = new PopChoiceExt(
+                    QuestTranslation.translate("betterquesting.gui.claim_all_warning") + "\n\n"
+                        + QuestTranslation.translate("betterquesting.gui.claim_all_confirm")
+                        + "\n\n"
+                        + QuestTranslation.translate(
+                            "betterquesting.gui.claim_all_quest_count",
+                            claimIdList != null ? claimIdList.size() : 0)
+                        + "\n"
+                        + QuestTranslation
+                            .translate("betterquesting.gui.claim_all_choice_quest_count", numChoiceQuests),
+                    PresetIcon.ICON_CHEST_ALL.getTexture());
+
+                popup.addOption(
+                    QuestTranslation.translate("gui.yes"),
+                    btn -> claimAll(claimIdList, BQ_Settings.claimAllRandomChoice),
+                    true);
+                popup.addOption(QuestTranslation.translate("betterquesting.gui.yes_always"), btn -> {
+                    ConfigHandler.config.get(Configuration.CATEGORY_GENERAL, "Claim all requires confirmation", true)
+                        .set(false);
+                    ConfigHandler.config.save();
+                    ConfigHandler.initConfigs();
+                    claimAll(claimIdList, BQ_Settings.claimAllRandomChoice);
+                }, true);
+                popup.addOption(QuestTranslation.translate("gui.no"), null, true);
+                popup.addOption(getForceChoiceString(), btn -> {
+                    // Always save the result of the checkbox, this way it is "remembered" for next time
+                    Property prop = ConfigHandler.config
+                        .get(Configuration.CATEGORY_GENERAL, "Claim all random select choice rewards", false);
+                    prop.set(!prop.getBoolean());
+                    ConfigHandler.config.save();
+                    ConfigHandler.initConfigs();
+                    btn.setText(getForceChoiceString());
+                },
+                    false,
+                    QuestTranslation.translate("betterquesting.gui.force_choice_detailed_1"),
+                    QuestTranslation.translate("betterquesting.gui.force_choice_detailed_2"));
+
+                openPopup(popup);
+            } else {
+                claimAll(claimIdList, BQ_Settings.claimAllRandomChoice);
+            }
+        });
+        claimAll.setTooltip(
+            ImmutableList.of(
+                QuestTranslation.translate("betterquesting.btn.claim_all"),
+                QuestTranslation.translate("betterquesting.btn.claim_all_detailed")));
+        cvBackground.addPanel(claimAll);
+        yOff += 16;
+
+        PanelButton fitView = new PanelButton(new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, -2), 5, "");
+        fitView.setIcon(PresetIcon.ICON_BOX_FIT.getTexture());
+        fitView.setClickAction((b) -> { if (cvQuest.getQuestLine() != null) cvQuest.fitToWindow(); });
+        fitView.setTooltip(Collections.singletonList(QuestTranslation.translate("betterquesting.btn.zoom_fit")));
+        cvBackground.addPanel(fitView);
+        yOff += 16;
+
+        final PanelButton btnHideLocked = new PanelButton(
+            new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, -2),
+            -1,
+            "");
+        final Runnable updateHideLockedButton = () -> {
+            btnHideLocked.setIcon(
+                PresetIcon.ICON_QUEST_LINES_SHOWN.getTexture(),
+                BQ_Settings.hideLockedQuestLines ? new GuiColorStatic(0xFF444444) : new GuiColorStatic(0xFFFFFFFF),
+                0);
+            btnHideLocked.setTooltip(
+                Arrays.asList(
+                    QuestTranslation.translate("betterquesting.btn.hide_locked_quest_lines"),
+                    QuestTranslation.translate("betterquesting.tooltip.cycle." + BQ_Settings.hideLockedQuestLines)));
+        };
+        updateHideLockedButton.run();
+        btnHideLocked.setClickAction((b) -> {
+            BQ_Settings.hideLockedQuestLines = !BQ_Settings.hideLockedQuestLines;
+            ConfigHandler.config.get(
+                Configuration.CATEGORY_GENERAL,
+                "Hide locked quest lines",
+                false,
+                "If true, quest lines with no currently visible quests are hidden from the quest line list. This property can be changed by the GUI.")
+                .set(BQ_Settings.hideLockedQuestLines);
+            ConfigHandler.config.save();
+
+            updateHideLockedButton.run();
+            refreshGui();
+        });
+        cvBackground.addPanel(btnHideLocked);
+        yOff += 16;
+
+        // View Mode Button
+        if (BQ_Settings.viewModeBtn) {
+            final PanelButton btnViewMode = new PanelButton(
+                new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, -2),
+                -1,
+                "");
+            final Runnable updateViewModeButton = () -> {
+                btnViewMode.setIcon(
+                    PresetIcon.ICON_VIEW_MODE_ON.getTexture(),
+                    viewMode ? new GuiColorStatic(0xFFFFFFFF) : new GuiColorStatic(0xFF444444),
+                    0);
+                btnViewMode.setTooltip(
+                    Arrays.asList(
+                        QuestTranslation.translate("betterquesting.btn.view_mode"),
+                        QuestTranslation.translate("betterquesting.tooltip.cycle." + viewMode)));
+            };
+            updateViewModeButton.run();
+            btnViewMode.setClickAction((b) -> {
+                viewMode = !viewMode;
+                ConfigHandler.config.get(Configuration.CATEGORY_GENERAL, "View mode", false)
+                    .set(viewMode);
+                ConfigHandler.config.save();
+                ConfigHandler.initConfigs();
+                updateViewModeButton.run();
+                refreshGui();
+            });
+            cvBackground.addPanel(btnViewMode);
+            yOff += 16;
+        }
+
+        // Always Draw Implicit Dependency Button
+        final PanelButton btnImplicit = new PanelButton(
+            new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, -2),
+            -1,
+            "");
+        final Runnable updateImplicitButton = () -> {
+            btnImplicit.setIcon(
+                PresetIcon.ICON_VISIBILITY_NORMAL.getTexture(),
+                alwaysDrawImplicit ? new GuiColorStatic(0xFFFFFFFF) : new GuiColorStatic(0xFF444444),
+                0);
+            btnImplicit.setTooltip(
+                Arrays.asList(
+                    QuestTranslation.translate("betterquesting.btn.always_draw_implicit"),
+                    QuestTranslation.translate("betterquesting.tooltip.cycle." + alwaysDrawImplicit)));
+        };
+        updateImplicitButton.run();
+        btnImplicit.setClickAction((b) -> {
+            alwaysDrawImplicit = !alwaysDrawImplicit;
+            ConfigHandler.config
+                .get(
+                    Configuration.CATEGORY_GENERAL,
+                    "Always draw implicit dependency",
+                    false,
+                    "If true, always draw implicit dependency. This property can be changed by the GUI")
+                .set(alwaysDrawImplicit);
+            ConfigHandler.config.save();
+            ConfigHandler.initConfigs();
+            updateImplicitButton.run();
+            refreshGui();
+        });
+        cvBackground.addPanel(btnImplicit);
+        yOff += 16;
+
+        // Dependency Arrow Button
+        final PanelButton btnDependencyArrows = new PanelButton(
+            new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, -2),
+            -1,
+            "");
+        final Runnable updateDependencyArrowButton = () -> {
+            btnDependencyArrows.setIcon(
+                PresetIcon.ICON_TWO_WAY.getTexture(),
+                BQ_Settings.showDependencyArrows ? new GuiColorStatic(0xFFFFFFFF) : new GuiColorStatic(0xFF444444),
+                0);
+            btnDependencyArrows.setTooltip(
+                Arrays.asList(
+                    QuestTranslation.translate("betterquesting.btn.show_dependency_arrows"),
+                    QuestTranslation.translate("betterquesting.tooltip.cycle." + BQ_Settings.showDependencyArrows)));
+        };
+        updateDependencyArrowButton.run();
+        btnDependencyArrows.setClickAction((b) -> {
+            BQ_Settings.showDependencyArrows = !BQ_Settings.showDependencyArrows;
+            ConfigHandler.config.get(
+                Configuration.CATEGORY_GENERAL,
+                "Show dependency arrows",
+                false,
+                "If true, quest dependency lines will render directional arrows. This property can be changed by the GUI.")
+                .set(BQ_Settings.showDependencyArrows);
+            ConfigHandler.config.save();
+
+            updateDependencyArrowButton.run();
+            refreshGui();
+        });
+        cvBackground.addPanel(btnDependencyArrows);
+        yOff += 16;
+
+        // Quest Color Button
+        final PanelButton btnMonoText = new PanelButton(
+            new GuiTransform(GuiAlign.TOP_LEFT, 8, yOff, 32, 16, -2),
+            -1,
+            "");
+        final Runnable updateMonoButton = () -> {
+            btnMonoText.setIcon(
+                PresetIcon.ICON_PAINT.getTexture(),
+                BQ_Settings.forceMonochromeText ? new GuiColorStatic(0xFF444444) : new GuiColorStatic(0xFFFFFFFF),
+                0);
+            btnMonoText.setTooltip(
+                Arrays.asList(
+                    QuestTranslation.translate("betterquesting.btn.force_monochrome"),
+                    QuestTranslation.translate("betterquesting.tooltip.cycle." + !forceMonochromeText)));
+        };
+        updateMonoButton.run();
+        btnMonoText.setClickAction((b) -> {
+            BQ_Settings.forceMonochromeText = !BQ_Settings.forceMonochromeText;
+            ConfigHandler.config.get(
+                Configuration.CATEGORY_GENERAL,
+                "Force Monochrome Text",
+                false,
+                "If true, quest titles and text content will show no color. This property can be changed by the GUI.")
+                .set(BQ_Settings.forceMonochromeText);
+            ConfigHandler.config.save();
+
+            updateMonoButton.run();
+            refreshGui();
+        });
+        cvBackground.addPanel(btnMonoText);
+
+        // === CHAPTER VIEWPORT ===
+
+        CanvasQuestLine oldCvQuest = cvQuest;
+        cvQuest = new CanvasQuestLine(new GuiTransform(GuiAlign.FULL_BOX, new GuiPadding(0, 0, 0, 0), 0), 2);
+        CanvasEmpty cvQuestPopup = new CanvasEmpty(new GuiTransform(GuiAlign.FULL_BOX, new GuiPadding(0, 0, 0, 0), 0)) {
+
+            @Override
+            public boolean onMouseClick(int mx, int my, int click) {
+                if (cvQuest.getQuestLine() == null || !this.getTransform()
+                    .contains(mx, my)) return false;
+                if (click == 1) {
+                    FontRenderer fr = Minecraft.getMinecraft().fontRenderer;
+
+                    PanelButtonQuest btnQuest = cvQuest.getButtonAt(mx, my);
+
+                    if (btnQuest != null) {
+                        UUID questId = btnQuest.getStoredValue()
+                            .getKey();
+                        IQuest theQuest = QuestDatabase.INSTANCE.get(questId);
+                        int maxWidth = RenderUtils
+                            .getStringWidth(QuestTranslation.translate("betterquesting.btn.share_quest"), fr);
+                        maxWidth = Math.max(
+                            maxWidth,
+                            RenderUtils.getStringWidth(
+                                QuestTranslation.translate("betterquesting.btn.view_dependencies"),
+                                fr));
+                        maxWidth = Math.max(
+                            maxWidth,
+                            RenderUtils
+                                .getStringWidth(QuestTranslation.translate("betterquesting.btn.view_dependants"), fr));
+
+                        int menuItemCount = 5 + QuestContextMenuRegistry.getEntries()
+                            .size(); // bookmark, share, copy, deps, dependants + external
+                        PopContextMenuHoverSub popup = new PopContextMenuHoverSub(
+                            new GuiRectangle(mx, my, maxWidth + 20, menuItemCount * 16),
+                            true);
+
+                        Runnable pinQuest = () -> {
+                            boolean bookmarked = BookmarkHandler.bookmarkQuest(questId);
+                            btnQuest.setBookmarked(bookmarked);
+                            closePopup();
+                        };
+
+                        String pinPopupText;
+                        if (BookmarkHandler.isBookmarked(questId)) {
+                            pinPopupText = QuestTranslation.translate("betterquesting.btn.unbookmark_quest");
+                        } else {
+                            pinPopupText = QuestTranslation.translate("betterquesting.btn.bookmark_quest");
+                        }
+                        popup.addButton(pinPopupText, null, pinQuest);
+
+                        Runnable questSharer = () -> {
+                            mc.thePlayer
+                                .sendChatMessage("betterquesting.msg.sharequest:" + UuidConverter.encodeUuid(questId));
+                            closePopup();
+                        };
+                        popup
+                            .addButton(QuestTranslation.translate("betterquesting.btn.share_quest"), null, questSharer);
+
+                        Runnable copyQuestId = () -> {
+                            String questIdString = UuidConverter.encodeUuid(questId);
+                            GuiScreen.setClipboardString(questIdString);
+                            mc.thePlayer.addChatMessage(
+                                new ChatComponentText(
+                                    QuestTranslation.translate("betterquesting.msg.copy_quest_copied")));
+                            mc.thePlayer
+                                .addChatMessage(new ChatComponentText("  " + EnumChatFormatting.AQUA + questIdString));
+                            closePopup();
+                        };
+                        popup.addButton(QuestTranslation.translate("betterquesting.btn.copy_quest"), null, copyQuestId);
+
+                        // View Dependencies sub-menu
+                        if (theQuest != null) {
+                            UUID playerUUID = QuestingAPI.getQuestingUUID(mc.thePlayer);
+                            List<PopContextMenuHoverSub.SubMenuEntry> depEntries = new ArrayList<>();
+                            for (UUID reqId : theQuest.getRequirements()) {
+                                IQuest reqQuest = QuestDatabase.INSTANCE.get(reqId);
+                                if (reqQuest != null && isQuestInQuestLine(reqId)
+                                    && QuestCache.isQuestShown(reqQuest, playerUUID, mc.thePlayer)) {
+                                    String name = QuestTranslation.translateQuestName(reqId, reqQuest);
+                                    final UUID targetId = reqId;
+                                    depEntries.add(new PopContextMenuHoverSub.SubMenuEntry(name, () -> {
+                                        closePopup();
+                                        navigateToQuest(targetId);
+                                    }));
+                                }
+                            }
+                            popup.addSubMenu(
+                                QuestTranslation.translate("betterquesting.btn.view_dependencies"),
+                                depEntries);
+
+                            // View Dependants sub-menu
+                            List<PopContextMenuHoverSub.SubMenuEntry> dependantEntries = new ArrayList<>();
+                            for (Map.Entry<UUID, IQuest> entry : QuestDatabase.INSTANCE.entrySet()) {
+                                if (entry.getValue() != null && entry.getValue()
+                                    .getRequirements()
+                                    .contains(questId)
+                                    && isQuestInQuestLine(entry.getKey())
+                                    && QuestCache.isQuestShown(entry.getValue(), playerUUID, mc.thePlayer)) {
+                                    String name = QuestTranslation.translateQuestName(entry.getKey(), entry.getValue());
+                                    final UUID targetId = entry.getKey();
+                                    dependantEntries.add(new PopContextMenuHoverSub.SubMenuEntry(name, () -> {
+                                        closePopup();
+                                        navigateToQuest(targetId);
+                                    }));
+                                }
+                            }
+                            popup.addSubMenu(
+                                QuestTranslation.translate("betterquesting.btn.view_dependants"),
+                                dependantEntries);
+                        }
+
+                        // External entries registered by other mods
+                        for (IQuestContextMenuEntry ext : QuestContextMenuRegistry.getEntries()) {
+                            final IQuest capturedQuest = theQuest;
+                            final UUID capturedId = questId;
+                            popup.addButton(ext.getLabel(capturedId, capturedQuest), null, () -> {
+                                ext.getAction(capturedId, capturedQuest)
+                                    .run();
+                                closePopup();
+                            });
+                        }
+
+                        openPopup(popup);
+                        return true;
+                    }
+                }
+                return false;
+            }
+        };
+        cvFrame.addPanel(cvQuest);
+        cvFrame.addPanel(cvQuestPopup);
+
+        if (selectedLine != null) {
+            cvQuest.setQuestLine(selectedLine);
+
+            if (oldCvQuest != null) {
+                cvQuest.setZoom(oldCvQuest.getZoom());
+                cvQuest.setScrollX(oldCvQuest.getScrollX());
+                cvQuest.setScrollY(oldCvQuest.getScrollY());
+                cvQuest.refreshScrollBounds();
+                cvQuest.updatePanelScroll();
+            }
+
+            refreshQuestCompletion();
+            txTitle.setText(QuestTranslation.translateQuestLineName(selectedLineId, selectedLine));
+            icoChapter
+                .setTexture(new OreDictTexture(1F, selectedLine.getProperty(NativeProps.ICON), false, true), null);
+        }
+
+        // === MISC ===
+
+        cvChapterTray.setTrayState(chapterTrayOpened, 1);
+        cvDescTray.setTrayState(descTrayOpened, 1);
+
+        refreshChapterVisibility();
+        refreshClaimAll();
+
+        cvLines.setScrollY(scrollPosition.getChapterScrollY());
+        cvLines.updatePanelScroll();
+    }
+
+    private String getForceChoiceString() {
+        String key = BQ_Settings.claimAllRandomChoice ? "betterquesting.gui.force_choice_yes"
+            : "betterquesting.gui.force_choice_no";
+        return QuestTranslation.translate(key);
+    }
+
+    private boolean hasCompletedQuest() {
+        UUID playerID = QuestingAPI.getQuestingUUID(mc.thePlayer);
+        for (Map.Entry<UUID, IQuest> entry : QuestDatabase.INSTANCE.entrySet()) {
+            IQuest quest = entry.getValue();
+            if (quest != null && quest.isComplete(playerID)) return true;
+        }
+        return false;
+    }
+
+    private boolean selectFirstQuestLine() {
+        List<Map.Entry<UUID, IQuestLine>> lineList = QuestLineDatabase.INSTANCE.getOrderedEntries();
+        if (lineList.isEmpty()) return false;
+
+        Map.Entry<UUID, IQuestLine> entry = lineList.get(0);
+        selectedLineId = entry.getKey();
+        selectedLine = entry.getValue();
+        return true;
+    }
+
+    private GuiBookmarks initBookmarksPanel() {
+        GuiBookmarks pinsGui = new GuiBookmarks(this);
+        pinsGui.setCallback(entry -> {
+            openQuestLine(entry.getQuestLineEntry());
+            UUID selectedQuestId = entry.getQuest()
+                .getKey();
+            Optional<PanelButtonQuest> targetQuestButton = cvQuest.getQuestButtons()
+                .stream()
+                .filter(
+                    panelButtonQuest -> panelButtonQuest.getStoredValue()
+                        .getKey()
+                        .equals(selectedQuestId))
+                .findFirst();
+            targetQuestButton.ifPresent(this::highlightButton);
+        });
+        return pinsGui;
+    }
+
+    private GuiQuestSearch initSearchPanel() {
+        GuiQuestSearch searchGui = new GuiQuestSearch(this);
+        searchGui.setCallback(entry -> {
+            openQuestLine(entry.getQuestLineEntry());
+            UUID selectedQuestId = entry.getQuest()
+                .getKey();
+            Optional<PanelButtonQuest> targetQuestButton = cvQuest.getQuestButtons()
+                .stream()
+                .filter(
+                    panelButtonQuest -> panelButtonQuest.getStoredValue()
+                        .getKey()
+                        .equals(selectedQuestId))
+                .findFirst();
+            targetQuestButton.ifPresent(this::highlightButton);
+        });
+
+        return searchGui;
+    }
+
+    @Override
+    public boolean onMouseRelease(int mx, int my, int click) {
+        try {
+            return super.onMouseRelease(mx, my, click);
+        } finally {
+            if (cvLines != null) {
+                scrollPosition.setChapterScrollY(cvLines.getScrollY());
+            }
+        }
+    }
+
+    @Override
+    public boolean onMouseScroll(int mx, int my, int scroll) {
+        try {
+            return super.onMouseScroll(mx, my, scroll);
+        } finally {
+            if (cvLines != null) {
+                scrollPosition.setChapterScrollY(cvLines.getScrollY());
+            }
+        }
+    }
+
+    private Pair<List<UUID>, Integer> getAllPossibleClaims() {
+        if (cvQuest.getQuestButtons()
+            .isEmpty()) {
+            return null;
+        }
+
+        List<UUID> claimIdList = new ArrayList<>();
+        int numChoiceRewards = 0;
+
+        for (PanelButtonQuest pbQuest : cvQuest.getQuestButtons()) {
+            IQuest q = pbQuest.getStoredValue()
+                .getValue();
+
+            if (q.getRewards()
+                .size() == 0) continue;
+
+            // always true here for the maximum possible quests
+            if (q.canClaim(mc.thePlayer, true)) {
+                claimIdList.add(
+                    pbQuest.getStoredValue()
+                        .getKey());
+            }
+
+            for (DBEntry<IReward> rewardEntry : q.getRewards()
+                .getEntries()) {
+                IReward reward = rewardEntry.getValue();
+                if (reward instanceof RewardChoice) {
+                    numChoiceRewards++;
+                    break;
+                }
+            }
+        }
+
+        return Pair.of(claimIdList, numChoiceRewards);
+    }
+
+    private void claimAll(List<UUID> claimIdList, boolean forceChoice) {
+        if (claimIdList == null || claimIdList.isEmpty()) return;
+        if (forceChoice) {
+            NetQuestAction.requestClaimForceChoice(claimIdList);
+        } else {
+            NetQuestAction.requestClaim(claimIdList);
+        }
+        claimAll.setIcon(PresetIcon.ICON_CHEST_ALL.getTexture(), new GuiColorStatic(0xFF444444), 0);
+    }
+
+    @Override
+    public void onPanelEvent(PanelEvent event) {
+        if (event instanceof PEventButton) {
+            onButtonPress((PEventButton) event);
+        }
+    }
+
+    // TODO: Change CanvasQuestLine to NOT need these panel events anymore
+    private void onButtonPress(PEventButton event) {
+        Minecraft mc = Minecraft.getMinecraft();
+        IPanelButton btn = event.getButton();
+
+        if (btn.getButtonID() == 2 && btn instanceof PanelButtonStorage) // Quest Instance Select
+        {
+            @SuppressWarnings("unchecked")
+            Map.Entry<UUID, IQuest> quest = ((PanelButtonStorage<Map.Entry<UUID, IQuest>>) btn).getStoredValue();
+            GuiHome.bookmark = new GuiQuest(this, quest.getKey());
+
+            mc.displayGuiScreen(GuiHome.bookmark);
+        }
+    }
+
+    private void refreshChapterVisibility() {
+        boolean canEdit = QuestingAPI.getAPI(ApiReference.SETTINGS)
+            .canUserEdit(mc.thePlayer);
+        List<Map.Entry<UUID, IQuestLine>> lineList = QuestLineDatabase.INSTANCE.getOrderedEntries();
+        this.visChapters.clear();
+        UUID playerID = QuestingAPI.getQuestingUUID(mc.thePlayer);
+
+        for (Map.Entry<UUID, IQuestLine> entry : lineList) {
+            IQuestLine ql = entry.getValue();
+            EnumQuestVisibility vis = ql.getProperty(NativeProps.VISIBILITY);
+            if (!canEdit && vis == EnumQuestVisibility.HIDDEN) {
+                continue;
+            }
+
+            boolean show = false;
+            boolean unlocked = false;
+            boolean complete = false;
+            boolean allComplete = true;
+            boolean pendingClaim = false;
+
+            if (canEdit) {
+                show = true;
+                unlocked = true;
+                complete = true;
+            }
+
+            if (BQ_Settings.viewMode) {
+                show = true;
+            }
+
+            if (BQ_Settings.viewModeAllQuestLine) {
+                unlocked = true;
+            }
+
+            for (Map.Entry<UUID, IQuestLineEntry> qID : ql.entrySet()) {
+                IQuest q = QuestDatabase.INSTANCE.get(qID.getKey());
+                if (q == null) continue;
+
+                if (allComplete && !isQuestCompletedForQuestline(playerID, q)) allComplete = false;
+                if (!pendingClaim && q.canClaimBasically(mc.thePlayer)) pendingClaim = true;
+                if (!unlocked && q.isUnlocked(playerID)) unlocked = true;
+                if (!complete && q.isComplete(playerID)) complete = true;
+                if (!show && QuestCache.isQuestShown(q, playerID, mc.thePlayer)) show = true;
+                if (unlocked && complete && show && pendingClaim && !allComplete) break;
+            }
+
+            if (vis == EnumQuestVisibility.COMPLETED && !complete) {
+                continue;
+            } else if (vis == EnumQuestVisibility.UNLOCKED && !unlocked) {
+                continue;
+            }
+
+            int val = pendingClaim ? 1 : 0;
+            if (allComplete) {
+                val |= 2;
+            }
+            if (!show) {
+                val |= 4;
+            }
+
+            visChapters.add(new Tuple2<>(entry, val));
+        }
+
+        if (cvChapterTray.isTrayOpen()) buildChapterList();
+
+        computeGlobalCompletion();
+    }
+
+    private boolean isQuestCompletedForQuestline(UUID playerID, IQuest q) {
+        if (q.isComplete(playerID)) return true; // Completed quest
+        EnumQuestVisibility vis = q.getProperty(NativeProps.VISIBILITY);
+        if (vis == EnumQuestVisibility.HIDDEN) return true; // Always hidden quest
+        if (vis == EnumQuestVisibility.SECRET) return true; // Always secret quest
+        if (!q.getProperty(NativeProps.COUNT_AS_QUEST)) return true; // Excluded from completion count
+        if (q.getProperty(NativeProps.LOGIC_QUEST) == EnumLogic.XOR) { // Quest with choice
+            int reqCount = 0;
+            for (UUID qRequirementId : q.getRequirements()) {
+                IQuest quest = QuestDatabase.INSTANCE.get(qRequirementId);
+                if (quest.isComplete(playerID)) reqCount++;
+                if (reqCount == 2) return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void buildChapterList() {
+        cvLines.resetCanvas();
+        btnListRef.clear();
+        btnVisibilityRef.clear();
+
+        int listW = cvLines.getTransform()
+            .getWidth();
+
+        int row = 0;
+        for (int n = 0; n < visChapters.size(); n++) {
+            Map.Entry<UUID, IQuestLine> entry = visChapters.get(n)
+                .getFirst();
+            int vis = visChapters.get(n)
+                .getSecond();
+
+            if (BQ_Settings.hideLockedQuestLines && (vis & 4) > 0) continue;
+
+            cvLines.addPanel(
+                new PanelGeneric(
+                    new GuiRectangle(0, row * 16, 16, 16, 0),
+                    new OreDictTexture(
+                        1F,
+                        entry.getValue()
+                            .getProperty(NativeProps.ICON),
+                        false,
+                        true)));
+
+            if ((vis & 1) > 0) {
+                cvLines.addPanel(
+                    new PanelGeneric(
+                        new GuiRectangle(8, row * 16 + 8, 8, 8, -1),
+                        new GuiTextureColored(PresetIcon.ICON_NOTICE.getTexture(), new GuiColorStatic(0xFFFFFF00))));
+            } else if ((vis & 2) > 0) {
+                cvLines.addPanel(
+                    new PanelGeneric(
+                        new GuiRectangle(8, row * 16 + 8, 8, 8, -1),
+                        new GuiTextureColored(PresetIcon.ICON_TICK.getTexture(), new GuiColorStatic(0xFF00FF00))));
+            }
+            PanelButtonStorage<Map.Entry<UUID, IQuestLine>> btnLine = new PanelButtonStorage<>(
+                new GuiRectangle(16, row * 16, listW - 16, 16, 0),
+                1,
+                QuestTranslation.translateQuestLineName(entry),
+                entry);
+            btnLine.setTextAlignment(0);
+            btnLine.setActive(
+                (vis & 4) == 0 && !entry.getKey()
+                    .equals(selectedLineId));
+            btnLine.setCallback(this::openQuestLine);
+            cvLines.addPanel(btnLine);
+            btnListRef.add(btnLine);
+            btnVisibilityRef.add(vis);
+            row++;
+        }
+
+        cvLines.refreshScrollBounds();
+        updateQuestLineScrollbar(row);
+    }
+
+    private void updateQuestLineScrollbar(int rows) {
+        int viewHeight = cvLines.getTransform()
+            .getHeight();
+        int contentHeight = rows * 16;
+        boolean scrollable = contentHeight > viewHeight;
+
+        scLines.setEnabled(scrollable);
+        if (scrollable) {
+            scLines.setHandleSize(Math.max(16, viewHeight * viewHeight / contentHeight), 0);
+        }
+    }
+
+    private void refreshQuestCompletion() {
+        EntityPlayer player = mc.thePlayer;
+        UUID playerUUId = QuestingAPI.getQuestingUUID(player);
+
+        if (selectedLine == null) {
+            return;
+        }
+
+        questsCompleted = 0;
+        totalQuests = 0;
+
+        for (Map.Entry<UUID, IQuestLineEntry> entry : selectedLine.entrySet()) {
+            IQuest quest = QuestingAPI.getAPI(ApiReference.QUEST_DB)
+                .get(entry.getKey());
+            if (quest == null) {
+                if (BQ_Settings.logNullQuests) {
+                    BetterQuesting.logger.warn("Skipping null quest with ID {}", entry.getKey());
+                }
+                continue;
+            }
+
+            EnumQuestVisibility vis = quest.getProperty(NativeProps.VISIBILITY);
+            if (vis == EnumQuestVisibility.HIDDEN || vis == EnumQuestVisibility.SECRET) {
+                continue;
+            }
+
+            if (!quest.getProperty(NativeProps.COUNT_AS_QUEST)) {
+                continue; // excluded from completion count
+            }
+
+            totalQuests++;
+
+            if (quest.isComplete(playerUUId) || !quest.isUnlockable(playerUUId)) {
+                questsCompleted++;
+            }
+        }
+        String completionPercent = totalQuests > 0 ? String.format("%.2f", questsCompleted * 100.0 / totalQuests)
+            : "0.00";
+        completionText.setText(
+            QuestTranslation
+                .translate("betterquesting.title.completion", questsCompleted, totalQuests, completionPercent));
+    }
+
+    private void computeGlobalCompletion() {
+        UUID playerUUId = QuestingAPI.getQuestingUUID(mc.thePlayer);
+
+        globalQuestsCompleted = 0;
+        globalTotalQuests = 0;
+
+        Set<UUID> seen = new HashSet<>();
+
+        for (Tuple2<Map.Entry<UUID, IQuestLine>, Integer> visChapter : visChapters) {
+            IQuestLine line = visChapter.getFirst()
+                .getValue();
+            for (Map.Entry<UUID, IQuestLineEntry> entry : line.entrySet()) {
+                UUID questId = entry.getKey();
+                if (!seen.add(questId)) continue; // already counted in another visible line
+
+                IQuest quest = QuestingAPI.getAPI(ApiReference.QUEST_DB)
+                    .get(questId);
+                if (quest == null) {
+                    continue;
+                }
+
+                EnumQuestVisibility vis = quest.getProperty(NativeProps.VISIBILITY);
+                if (vis == EnumQuestVisibility.HIDDEN || vis == EnumQuestVisibility.SECRET) {
+                    continue;
+                }
+
+                if (!quest.getProperty(NativeProps.COUNT_AS_QUEST)) {
+                    continue; // excluded from completion count
+                }
+
+                globalTotalQuests++;
+                if (quest.isComplete(playerUUId) || !quest.isUnlockable(playerUUId)) {
+                    globalQuestsCompleted++;
+                }
+            }
+        }
+
+        if (txGlobalCompletion != null) {
+            String percent = globalTotalQuests > 0
+                ? String.format("%.2f", globalQuestsCompleted * 100.0 / globalTotalQuests)
+                : "0.00";
+            txGlobalCompletion.setText(
+                QuestTranslation.translate(
+                    "betterquesting.title.completion_total",
+                    globalQuestsCompleted,
+                    globalTotalQuests,
+                    percent));
+        }
+    }
+
+    private void openQuestLine(Map.Entry<UUID, IQuestLine> q) {
+        selectedLine = q.getValue();
+        selectedLineId = q.getKey();
+        for (int i = 0; i < btnListRef.size(); i++) {
+            btnListRef.get(i)
+                .setActive(
+                    (btnVisibilityRef.get(i) & 4) == 0 && !btnListRef.get(i)
+                        .getStoredValue()
+                        .getKey()
+                        .equals(selectedLineId));
+        }
+
+        cvQuest.setQuestLine(q.getValue());
+        icoChapter.setTexture(
+            new OreDictTexture(
+                1F,
+                q.getValue()
+                    .getProperty(NativeProps.ICON),
+                false,
+                true),
+            null);
+        txTitle.setText(QuestTranslation.translateQuestLineName(q));
+        refreshQuestCompletion();
+
+        if (!trayLock) {
+            cvFrame.setTrayState(true, 200);
+            cvChapterTray.setTrayState(false, 200);
+            cvQuest.fitToWindow();
+        }
+        refreshClaimAll();
+    }
+
+    private void refreshContent() {
+        if (selectedLineId != null) {
+            selectedLine = QuestLineDatabase.INSTANCE.get(selectedLineId);
+            if (selectedLine == null) {
+                selectedLineId = null;
+            }
+        } else {
+            selectedLine = null;
+        }
+
+        float zoom = cvQuest.getZoom();
+        int sx = cvQuest.getScrollX();
+        int sy = cvQuest.getScrollY();
+        /* if(cvQuest.getQuestLine() != selectedLine) */ cvQuest.setQuestLine(selectedLine);
+        cvQuest.setZoom(zoom);
+        cvQuest.setScrollX(sx);
+        cvQuest.setScrollY(sy);
+        cvQuest.refreshScrollBounds();
+        cvQuest.updatePanelScroll();
+
+        if (selectedLine != null) {
+            refreshQuestCompletion();
+            txTitle.setText(QuestTranslation.translateQuestLineName(selectedLineId, selectedLine));
+            icoChapter
+                .setTexture(new OreDictTexture(1F, selectedLine.getProperty(NativeProps.ICON), false, true), null);
+        } else {
+            txTitle.setText("");
+            icoChapter.setTexture(null, null);
+        }
+
+        refreshClaimAll();
+    }
+
+    private void refreshClaimAll() {
+        if (cvQuest.getQuestLine() == null || cvQuest.getQuestButtons()
+            .isEmpty()) {
+            claimAll.setActive(false);
+            claimAll.setIcon(PresetIcon.ICON_CHEST_ALL.getTexture(), new GuiColorStatic(0xFF444444), 0);
+            return;
+        }
+
+        for (PanelButtonQuest btn : cvQuest.getQuestButtons()) {
+            // Always check with forceChoice true to ensure the button can appear even if
+            // there are only choice reward quests available to claim currently
+            if (btn.getStoredValue()
+                .getValue()
+                .canClaim(mc.thePlayer, true)) {
+                claimAll.setActive(true);
+                claimAll.setIcon(
+                    PresetIcon.ICON_CHEST_ALL.getTexture(),
+                    new GuiColorPulse(0xFFFFFFFF, 0xFF444444, 2F, 0F),
+                    0);
+                return;
+            }
+        }
+
+        claimAll.setIcon(PresetIcon.ICON_CHEST_ALL.getTexture(), new GuiColorStatic(0xFF444444), 0);
+        claimAll.setActive(false);
+    }
+
+    private void highlightButton(PanelButtonQuest panelButtonQuest) {
+        GuiTextureColored newTexture = new GuiTextureColored(
+            panelButtonQuest.txFrame,
+            new GuiColorPulse(new GuiColorStatic(0, 0, 0, 255), new GuiColorStatic(255, 191, 0, 255), 0.7, 0));
+        panelButtonQuest.setTextures(newTexture, newTexture, newTexture);
+        cvQuest.setZoom(2f);
+        cvQuest.centerOn(panelButtonQuest);
+    }
+
+    public void navigateToQuest(UUID targetQuestId) {
+        for (Map.Entry<UUID, IQuestLine> lineEntry : QuestLineDatabase.INSTANCE.entrySet()) {
+            if (lineEntry.getValue()
+                .containsKey(targetQuestId)) {
+                openQuestLine(lineEntry);
+                Optional<PanelButtonQuest> targetQuestButton = cvQuest.getQuestButtons()
+                    .stream()
+                    .filter(
+                        panelButtonQuest -> panelButtonQuest.getStoredValue()
+                            .getKey()
+                            .equals(targetQuestId))
+                    .findFirst();
+                targetQuestButton.ifPresent(this::highlightButton);
+                return;
+            }
+        }
+    }
+
+    private static boolean isQuestInQuestLine(UUID questId) {
+        for (Map.Entry<UUID, IQuestLine> lineEntry : QuestLineDatabase.INSTANCE.entrySet()) {
+            if (lineEntry.getValue()
+                .containsKey(questId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

@@ -1,0 +1,95 @@
+## private
+manyLib.gui.button.controls=ManyLib Controls
+manyLib.gui.button.controls.comment=Click me to manage controls
+manyLib.gui.button.options=ManyLib Options
+manyLib.gui.button.pageUp=Page Up
+manyLib.gui.button.pageDown=Page Down
+manyLib.gui.button.search=Search
+manyLib.gui.button.reset=Reset
+manyLib.gui.button.reset_all=Reset All
+manyLib.gui.button.keySettings=Key Settings
+manyLib.gui.button.other_mods=Other Mods
+
+manyLib.gui.button.hover.hold_shift_for_info=§oHold Shift for more information§r
+
+manyLib.gui.reset_hotkeys_question=Are you sure you want to reset all hotkeys?
+manyLib.gui.reset_values_question=Are you sure you want to reset all values?
+manyLib.gui.reset_tab_question=Are you sure you want to reset all configs in this tab?
+manyLib.gui.title.options=ManyLib Options
+manyLib.gui.title.controls=ManyLib Controls
+manyLib.gui.title.keySettings=Keybind Settings
+manyLib.gui.title.globalSearching=Global Searching
+manyLib.gui.title.selectColor=Color Selecting
+manyLib.gui.title.editStringList=Edit String List
+manyLib.gui.configuring=Configuring
+manyLib.gui.rightClickToCopy=Right Click To Copy
+
+manyLib.gui.comment.available_values=Available Values
+manyLib.gui.comment.clickToSelectColor=Click To Select Color
+manyLib.gui.comment.clickToEditStringList=Click To Edit String List
+
+manyLib.configToggle.toggle=%s has been changed to: %s
+
+manyLib.message.formatting_code.error=§c
+manyLib.message.formatting_code.info=§f
+manyLib.message.formatting_code.success=§a
+manyLib.message.formatting_code.warning=§6
+
+manyLib.keybind.settings=Keybind Settings
+manyLib.keybind.settings.activate_on=Activate On
+manyLib.keybind.settings.context=Context
+manyLib.keybind.settings.allow_empty=Allow Empty
+manyLib.keybind.settings.allow_extra_keys=Allow Extra Keys
+manyLib.keybind.settings.order_sensitive=Order Sentsitive
+manyLib.keybind.settings.exclusive=Exclusive
+manyLib.keybind.settings.cancel=Cancel
+
+## configs
+config.name.manyLib.openMenu=Open ManyLib Menu
+config.comment.manyLib.openMenu=Display manyLib' own config menu
+config.name.manyLib.openModMenu=Open ManyLib Mods Menu
+config.comment.manyLib.openModMenu=Display manyLib relative mods menu
+config.name.manyLib.searchAny=Search ManyLib Global Config
+config.comment.manyLib.searchAny=Search manyLib relative mods config
+config.name.manyLib.hideValueButton=Hide Config Button
+config.comment.manyLib.hideValueButton=Hide the button added at the main menu and pause screen, you'd better hide when you have mod menu
+config.name.manyLib.hoverInfoY=Hovering Info Y Level
+config.comment.manyLib.hoverInfoY=Count up from the bottom
+config.comment.manyLib.sortCategory=Sort Category
+config.enum.manyLib.sortCategory.Default=Default
+config.enum.manyLib.sortCategory.PinYin=Chinese PinYin
+config.enum.manyLib.sortCategory.Alphabetical=Alphabetical
+config.enum.manyLib.sortCategory.Inverted=Inverted
+config.name.manyLib.highlightColor=Highlight color
+config.name.manyLib.titleFormat=Title Format
+config.name.manyLib.autoSaveLoad=Auto Save Load
+config.comment.manyLib.autoSaveLoad=(Works for all)read the config while entering a world, and save while quitting.
+
+config.menu.comment.ManyLib=Click me to hide the ManyLib button\nYou can still press %s to open it
+
+## generic
+config.tab.generic=Generic
+config.tab.hotkey=Hotkey
+
+toggle.on=On
+toggle.off=Off
+
+boolean.true=True
+boolean.false=False
+
+color.alpha=Alpha
+color.red=§cRed
+color.green=§aGreen
+color.blue=§9Blue
+color.hue=Hue
+color.saturation=Saturation
+color.brightness=Brightness
+
+list.empty=Empty List
+
+commands.manyLib.usage=Usage: /manyLib <command> [args]
+commands.manyLib.reload.usage=Usage: /manyLib reload <config>
+commands.manyLib.reload.success=Reloaded config %s
+commands.manyLib.reload.configNotFound=Config '%s' not found
+commands.manyLib.reloadAll.usage=Usage: /manyLib reloadAll
+commands.manyLib.reloadAll.success=Reloaded all configs
