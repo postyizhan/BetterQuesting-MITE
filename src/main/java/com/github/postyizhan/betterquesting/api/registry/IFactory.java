@@ -1,9 +1,9 @@
 package com.github.postyizhan.betterquesting.api.registry;
 
-import net.minecraft.ResourceLocation;
+import com.github.postyizhan.betterquesting.api.util.ResourceKey;
 
 public interface IFactory<T> {
-    ResourceLocation getRegistryName();
+    ResourceKey getRegistryName();
 
     T createNew();
 }

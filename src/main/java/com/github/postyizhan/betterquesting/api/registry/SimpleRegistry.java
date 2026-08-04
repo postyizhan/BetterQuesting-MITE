@@ -1,12 +1,12 @@
 package com.github.postyizhan.betterquesting.api.registry;
 
+import com.github.postyizhan.betterquesting.api.util.ResourceKey;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-import net.minecraft.ResourceLocation;
 
 public class SimpleRegistry<T extends IFactory<E>, E> implements IRegistry<T, E> {
-    private final HashMap<ResourceLocation, T> factories = new HashMap<>();
+    private final HashMap<ResourceKey, T> factories = new HashMap<>();
 
     @Override
     public void register(T factory) {
@@ -20,12 +20,12 @@ public class SimpleRegistry<T extends IFactory<E>, E> implements IRegistry<T, E>
     }
 
     @Override
-    public T getFactory(ResourceLocation idName) {
+    public T getFactory(ResourceKey idName) {
         return factories.get(idName);
     }
 
     @Override
-    public E createNew(ResourceLocation idName) {
+    public E createNew(ResourceKey idName) {
         IFactory<E> factory = getFactory(idName);
         return factory == null ? null : factory.createNew();
     }

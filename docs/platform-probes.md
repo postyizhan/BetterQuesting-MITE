@@ -47,6 +47,21 @@
 2. 为 BQ 自有 S2C open 消息携带 window id 与受限 GUI type；客户端 handler 创建对应 `GuiContainer`，并将同一 window id 写入 container。
 3. 在落地前以真实客户端连接验证 slot click、关闭和错误 window id；该选择属于阶段 8 内容设计，本轮不实现。
 
+## ResourceLocation 不可用作逻辑 ID（blocker，已由字节码确认）
+
+MITE 的 `net.minecraft.ResourceLocation` 不是纯值对象：它的构造器会把实例登记进一个静态待校验队列，随后由集成服务器 tick 周期性校验该资源文件是否真实存在，缺失时在客户端 HUD 上持续渲染红字错误。上游 BetterQuesting 把 `ResourceLocation` 当作纯逻辑标识（属性 key、factory ID、注册表 key），直接照搬会让每一个逻辑 ID 都变成一条虚假的资源缺失报错。
+
+证据链（全部来自当前 mapped JAR 的 `javap -c`）：
+
+1. `ResourceLocation(String,String)` 与 `ResourceLocation(String)` 分别以 `iconst_1` 委派到带 `boolean` 的构造器，即默认 `verify=true`。只有 3 参 `ResourceLocation(String,String,boolean)` 与 2 参 `ResourceLocation(String,boolean)` 能显式传 `false` 跳过。
+2. `verify=true` 时构造器调用 private `setVerificationPending()V`；该方法对不以 `.mcmeta` 结尾的 path 执行 `resources_to_verify.add(this)`。
+3. `MinecraftServer` 在 tick 中执行 `isDedicatedServer()` 取反且 `tickCounter % 20 == 0` 时调用 `ResourceLocation.verifyResourceLocations()V`。即该校验只在集成服务器（单人）跑，专服不跑，且每秒一次。
+4. `verifyResourceLocations()` 遍历队列逐个 `verifyExistence()`，随后 `clear()`。`verifyExistence()` 在 `exists()` 为假时调用 `Minecraft.setErrorMessage("Resource not found: " + getResourcePath())`。
+5. `exists()` 依次查 `Minecraft.theMinecraft.mcDefaultResourcePack.resourceExists(...)` 与 `Minecraft.MITE_resource_pack.resourceExists(...)`；两者皆无则为假。注意 `theMinecraft == null` 时它也会 `setErrorMessage("...checking too early")` 并返回假。
+6. `Minecraft.setErrorMessage(String)` 写入静态 `error_message`（仅保留首个非空值，重复值不重复打印 stderr）。`GuiIngame` 读取 `getErrorMessage()`，非空时在屏幕左上以颜色 `0xFF1193` 系红字绘制该消息以及 `Press [c] to clear error message.`。
+
+**结论与工程决定：** 领域层的逻辑标识必须使用自有值类型 `com.github.postyizhan.betterquesting.api.util.ResourceKey`，不得使用 `ResourceLocation`。`ResourceKey` 保持 `domain:path` 字符串形式与 MITE 的 domain 解析规则（按首个 `:` 切分，`indexOf > 1` 时取前缀为 domain，domain 小写化，缺省 `minecraft`），因此存档与 factory ID 的文本表示与上游一致。只有客户端在真正加载纹理、声音等实际资源文件时才转换为 `ResourceLocation`，并在该处显式决定是否参与校验。
+
 ## ManyLib 2.3.1 专服风险
 
 - 发布元数据为 `environment: "*"`，main entrypoint `fi.dy.masa.malilib.ManyLib` 会加载 `ManyLibConfig`。
