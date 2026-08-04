@@ -7,8 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ConcurrentModificationException;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -35,6 +37,9 @@ class UuidDatabaseTest {
         UuidDatabase<String> database = new UuidDatabase<>();
         database.put(FIRST, "value");
         assertThrows(IllegalArgumentException.class, () -> database.put(SECOND, "value"));
+        assertEquals("value", database.get(FIRST));
+        assertFalse(database.containsKey(SECOND));
+        assertEquals(FIRST, database.lookupKey("value"));
 
         database.forcePut(SECOND, "value");
         assertFalse(database.containsKey(FIRST));
@@ -85,6 +90,24 @@ class UuidDatabaseTest {
         assertFalse(valuesView.containsValue("third"));
         entriesView.clear();
         assertFalse(database.containsKey(FIRST));
+    }
+
+    @Test
+    void forcePutReturnsReplacedMappingWhenBothSidesConflict() {
+        UuidDatabase<String> database = new UuidDatabase<>();
+        database.put(FIRST, "first");
+        database.put(SECOND, "second");
+
+        assertEquals("first", database.forcePut(FIRST, "second"));
+        assertEquals("second", database.get(FIRST));
+        assertFalse(database.containsKey(SECOND));
+
+        database.clear();
+        database.put(FIRST, "first");
+        database.put(SECOND, "second");
+        assertEquals(SECOND, database.inverse().forcePut("second", FIRST));
+        assertEquals("second", database.get(FIRST));
+        assertFalse(database.containsKey(SECOND));
     }
 
     @Test
@@ -151,6 +174,78 @@ class UuidDatabaseTest {
     }
 
     @Test
+    void filteredViewIteratorsForbidRemovalAndEntriesRejectExcludedValues() {
+        UuidDatabase<String> database = new UuidDatabase<>();
+        database.put(FIRST, "first");
+        database.put(SECOND, "second");
+        IBiMap<UUID, String> filtered = database.filterEntries((key, value) -> !"excluded".equals(value));
+
+        assertIteratorRemoveUnsupported(filtered.entrySet().iterator());
+        assertIteratorRemoveUnsupported(filtered.keySet().iterator());
+        assertIteratorRemoveUnsupported(filtered.values().iterator());
+        assertIteratorRemoveUnsupported(filtered.inverse().entrySet().iterator());
+        assertIteratorRemoveUnsupported(filtered.inverse().keySet().iterator());
+        assertIteratorRemoveUnsupported(filtered.inverse().values().iterator());
+
+        Map.Entry<UUID, String> entry = filtered.entrySet().iterator().next();
+        assertThrows(IllegalArgumentException.class, () -> entry.setValue("excluded"));
+        assertEquals(entry.getKey(), database.lookupKey(entry.getValue()));
+    }
+
+    @Test
+    void filteredCollectionBulkOperationsOnlyRemoveMatchingMappings() {
+        UuidDatabase<String> database = filteredFixture();
+        IBiMap<UUID, String> filtered = database.filterEntries((key, value) -> !THIRD.equals(key));
+        assertTrue(filtered.entrySet().removeAll(Set.of(Map.entry(FIRST, "first"), Map.entry(THIRD, "third"))));
+        assertFalse(database.containsKey(FIRST));
+        assertTrue(database.containsKey(THIRD));
+
+        database = filteredFixture();
+        filtered = database.filterEntries((key, value) -> !THIRD.equals(key));
+        assertTrue(filtered.entrySet().retainAll(Set.of(Map.entry(FIRST, "first"), Map.entry(THIRD, "third"))));
+        assertTrue(database.containsKey(FIRST));
+        assertFalse(database.containsKey(SECOND));
+        assertTrue(database.containsKey(THIRD));
+
+        database = filteredFixture();
+        filtered = database.filterEntries((key, value) -> !THIRD.equals(key));
+        filtered.entrySet().clear();
+        assertEquals(Map.of(THIRD, "third"), database);
+
+        database = filteredFixture();
+        filtered = database.filterEntries((key, value) -> !THIRD.equals(key));
+        assertTrue(filtered.keySet().removeAll(Set.of(FIRST, THIRD)));
+        assertFalse(database.containsKey(FIRST));
+        assertTrue(database.containsKey(THIRD));
+
+        database = filteredFixture();
+        filtered = database.filterEntries((key, value) -> !THIRD.equals(key));
+        assertTrue(filtered.values().retainAll(Set.of("first", "third")));
+        assertTrue(database.containsKey(FIRST));
+        assertFalse(database.containsKey(SECOND));
+        assertTrue(database.containsKey(THIRD));
+
+        database = filteredFixture();
+        filtered = database.filterEntries((key, value) -> !THIRD.equals(key));
+        filtered.values().clear();
+        assertEquals(Map.of(THIRD, "third"), database);
+    }
+
+    @Test
+    void filteredIteratorsRemainLazyViewsOfUnderlyingMaps() {
+        UuidDatabase<String> database = new UuidDatabase<>();
+        database.put(FIRST, "first");
+        Iterator<Map.Entry<UUID, String>> forward = database.filterEntries((key, value) -> true).entrySet().iterator();
+        database.put(SECOND, "second");
+        assertThrows(ConcurrentModificationException.class, forward::hasNext);
+
+        Iterator<Map.Entry<String, UUID>> inverse = database.filterEntries((key, value) -> true)
+            .inverse().entrySet().iterator();
+        database.put(THIRD, "third");
+        assertThrows(ConcurrentModificationException.class, inverse::hasNext);
+    }
+
+    @Test
     void keyAndValueViewRemovalKeepsBothDirectionsSynchronized() {
         UuidDatabase<String> database = new UuidDatabase<>();
         database.put(FIRST, "first");
@@ -181,5 +276,19 @@ class UuidDatabaseTest {
         keys.remove();
         assertFalse(inverse.containsKey("second"));
         assertTrue(database.isEmpty());
+    }
+
+    private static UuidDatabase<String> filteredFixture() {
+        UuidDatabase<String> database = new UuidDatabase<>();
+        database.put(FIRST, "first");
+        database.put(SECOND, "second");
+        database.put(THIRD, "third");
+        return database;
+    }
+
+    private static void assertIteratorRemoveUnsupported(Iterator<?> iterator) {
+        assertTrue(iterator.hasNext());
+        iterator.next();
+        assertThrows(UnsupportedOperationException.class, iterator::remove);
     }
 }

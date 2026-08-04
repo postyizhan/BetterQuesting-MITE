@@ -60,6 +60,10 @@ class SimpleDatabaseTest {
         DBEntry<String> last = database.add(11, "last");
 
         assertEquals(List.of(first, last), database.bulkLookup(9, -1, 10, 11, 12));
+        assertEquals(List.of(), database.bulkLookup(Integer.MAX_VALUE));
+
+        TestDatabase<String> empty = new TestDatabase<>();
+        assertEquals(List.of(), empty.bulkLookup(-1, 0, Integer.MAX_VALUE));
     }
 
     @Test

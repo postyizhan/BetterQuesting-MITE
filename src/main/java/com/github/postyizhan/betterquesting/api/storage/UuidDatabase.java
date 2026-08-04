@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -416,6 +417,11 @@ public class UuidDatabase<T> extends AbstractMap<UUID, T> implements IUuidDataba
         }
 
         @Override
+        public Set<UUID> keySet() {
+            return filteredKeySet(filter);
+        }
+
+        @Override
         public Set<T> values() {
             return inverse.keySet();
         }
@@ -476,6 +482,11 @@ public class UuidDatabase<T> extends AbstractMap<UUID, T> implements IUuidDataba
         }
 
         @Override
+        public Set<T> keySet() {
+            return filteredInverseKeySet(forward.filter);
+        }
+
+        @Override
         public Set<UUID> values() {
             return forward.keySet();
         }
@@ -487,79 +498,7 @@ public class UuidDatabase<T> extends AbstractMap<UUID, T> implements IUuidDataba
 
         @Override
         public Set<Entry<T, UUID>> entrySet() {
-            return new AbstractSet<>() {
-                @Override
-                public Iterator<Entry<T, UUID>> iterator() {
-                    Iterator<Entry<UUID, T>> forwardIterator = forward.entrySet().iterator();
-                    return new Iterator<>() {
-                        private Entry<UUID, T> current;
-                        private UUID currentKey;
-                        private boolean canRemove;
-
-                        @Override
-                        public boolean hasNext() {
-                            return forwardIterator.hasNext();
-                        }
-
-                        @Override
-                        public Entry<T, UUID> next() {
-                            current = forwardIterator.next();
-                            currentKey = current.getKey();
-                            canRemove = true;
-                            T value = current.getValue();
-                            return new Map.Entry<>() {
-                                @Override
-                                public T getKey() {
-                                    return value;
-                                }
-
-                                @Override
-                                public UUID getValue() {
-                                    return reverseDatabase.get(value);
-                                }
-
-                                @Override
-                                public UUID setValue(UUID key) {
-                                    UUID previous = FilteredInverseView.this.put(value, key);
-                                    currentKey = key;
-                                    return previous;
-                                }
-
-                                @Override
-                                public boolean equals(Object other) {
-                                    return other instanceof Map.Entry<?, ?> entry
-                                        && Objects.equals(value, entry.getKey())
-                                        && Objects.equals(getValue(), entry.getValue());
-                                }
-
-                                @Override
-                                public int hashCode() {
-                                    return Objects.hashCode(value) ^ Objects.hashCode(getValue());
-                                }
-                            };
-                        }
-
-                        @Override
-                        public void remove() {
-                            if (!canRemove) {
-                                throw new IllegalStateException();
-                            }
-                            UuidDatabase.this.remove(currentKey);
-                            canRemove = false;
-                        }
-                    };
-                }
-
-                @Override
-                public int size() {
-                    return forward.size();
-                }
-
-                @Override
-                public void clear() {
-                    forward.clear();
-                }
-            };
+            return filteredInverseEntrySet(forward.filter);
         }
     }
 
@@ -567,89 +506,388 @@ public class UuidDatabase<T> extends AbstractMap<UUID, T> implements IUuidDataba
         return new AbstractSet<>() {
             @Override
             public Iterator<Map.Entry<UUID, T>> iterator() {
-                Iterator<UUID> keys = database.entrySet().stream()
-                    .filter(entry -> filter.test(entry.getKey(), entry.getValue()))
-                    .map(Map.Entry::getKey)
-                    .toList()
-                    .iterator();
+                Iterator<Map.Entry<UUID, T>> unfiltered = database.entrySet().iterator();
                 return new Iterator<>() {
-                    private UUID currentKey;
-                    private boolean canRemove;
+                    private Map.Entry<UUID, T> next;
+                    private boolean prepared;
+
+                    private void prepare() {
+                        while (!prepared && unfiltered.hasNext()) {
+                            Map.Entry<UUID, T> candidate = unfiltered.next();
+                            if (filter.test(candidate.getKey(), candidate.getValue())) {
+                                next = candidate;
+                                prepared = true;
+                            }
+                        }
+                    }
 
                     @Override
                     public boolean hasNext() {
-                        return keys.hasNext();
+                        prepare();
+                        return prepared;
                     }
 
                     @Override
                     public Map.Entry<UUID, T> next() {
-                        currentKey = keys.next();
-                        canRemove = true;
-                        return new Map.Entry<>() {
-                            private final UUID key = currentKey;
-
-                            @Override
-                            public UUID getKey() {
-                                return key;
-                            }
-
-                            @Override
-                            public T getValue() {
-                                return database.get(key);
-                            }
-
-                            @Override
-                            public T setValue(T value) {
-                                if (!filter.test(key, value)) {
-                                    throw new IllegalArgumentException("Entry does not match filter");
-                                }
-                                return UuidDatabase.this.put(key, value);
-                            }
-
-                            @Override
-                            public boolean equals(Object other) {
-                                return other instanceof Map.Entry<?, ?> entry
-                                    && Objects.equals(key, entry.getKey())
-                                    && Objects.equals(getValue(), entry.getValue());
-                            }
-
-                            @Override
-                            public int hashCode() {
-                                return Objects.hashCode(key) ^ Objects.hashCode(getValue());
-                            }
-                        };
+                        prepare();
+                        if (!prepared) {
+                            throw new NoSuchElementException();
+                        }
+                        UUID key = next.getKey();
+                        next = null;
+                        prepared = false;
+                        return filteredForwardEntry(key, filter);
                     }
 
                     @Override
                     public void remove() {
-                        if (!canRemove) {
-                            throw new IllegalStateException();
-                        }
-                        UuidDatabase.this.remove(currentKey);
-                        canRemove = false;
+                        // Guava's filtered BiMap views intentionally forbid removal through view iterators.
+                        throw new UnsupportedOperationException();
                     }
                 };
             }
 
             @Override
             public int size() {
-                int size = 0;
-                for (Map.Entry<UUID, T> entry : database.entrySet()) {
-                    if (filter.test(entry.getKey(), entry.getValue())) {
-                        size++;
-                    }
+                return filteredSize(filter);
+            }
+
+            @Override
+            public boolean remove(Object object) {
+                if (!(object instanceof Map.Entry<?, ?> entry) || !containsKey(entry.getKey())) {
+                    return false;
                 }
-                return size;
+                UUID key = (UUID) entry.getKey();
+                if (!Objects.equals(database.get(key), entry.getValue()) || !filter.test(key, database.get(key))) {
+                    return false;
+                }
+                UuidDatabase.this.remove(key);
+                return true;
+            }
+
+            @Override
+            public boolean removeAll(Collection<?> collection) {
+                Objects.requireNonNull(collection);
+                return removeFilteredEntries(filter,
+                    (key, value) -> collection.contains(new AbstractMap.SimpleImmutableEntry<>(key, value)));
+            }
+
+            @Override
+            public boolean retainAll(Collection<?> collection) {
+                Objects.requireNonNull(collection);
+                return removeFilteredEntries(filter,
+                    (key, value) -> !collection.contains(new AbstractMap.SimpleImmutableEntry<>(key, value)));
             }
 
             @Override
             public void clear() {
-                Iterator<Map.Entry<UUID, T>> iterator = iterator();
-                while (iterator.hasNext()) {
-                    iterator.next();
-                    iterator.remove();
-                }
+                removeFilteredEntries(filter, (key, value) -> true);
             }
         };
+    }
+
+    private Set<Map.Entry<T, UUID>> filteredInverseEntrySet(BiPredicate<UUID, T> filter) {
+        return new AbstractSet<>() {
+            @Override
+            public Iterator<Map.Entry<T, UUID>> iterator() {
+                Iterator<Map.Entry<T, UUID>> unfiltered = reverseDatabase.entrySet().iterator();
+                return new Iterator<>() {
+                    private Map.Entry<T, UUID> next;
+                    private boolean prepared;
+
+                    private void prepare() {
+                        while (!prepared && unfiltered.hasNext()) {
+                            Map.Entry<T, UUID> candidate = unfiltered.next();
+                            if (filter.test(candidate.getValue(), candidate.getKey())) {
+                                next = candidate;
+                                prepared = true;
+                            }
+                        }
+                    }
+
+                    @Override
+                    public boolean hasNext() {
+                        prepare();
+                        return prepared;
+                    }
+
+                    @Override
+                    public Map.Entry<T, UUID> next() {
+                        prepare();
+                        if (!prepared) {
+                            throw new NoSuchElementException();
+                        }
+                        T value = next.getKey();
+                        next = null;
+                        prepared = false;
+                        return filteredInverseEntry(value, filter);
+                    }
+
+                    @Override
+                    public void remove() {
+                        // Guava's filtered BiMap views intentionally forbid removal through view iterators.
+                        throw new UnsupportedOperationException();
+                    }
+                };
+            }
+
+            @Override
+            public int size() {
+                return filteredSize(filter);
+            }
+
+            @Override
+            public boolean remove(Object object) {
+                if (!(object instanceof Map.Entry<?, ?> entry) || !reverseDatabase.containsKey(entry.getKey())) {
+                    return false;
+                }
+                T value = (T) entry.getKey();
+                UUID key = reverseDatabase.get(value);
+                if (!Objects.equals(key, entry.getValue()) || !filter.test(key, value)) {
+                    return false;
+                }
+                UuidDatabase.this.remove(key);
+                return true;
+            }
+
+            @Override
+            public boolean removeAll(Collection<?> collection) {
+                Objects.requireNonNull(collection);
+                return removeFilteredEntries(filter,
+                    (key, value) -> collection.contains(new AbstractMap.SimpleImmutableEntry<>(value, key)));
+            }
+
+            @Override
+            public boolean retainAll(Collection<?> collection) {
+                Objects.requireNonNull(collection);
+                return removeFilteredEntries(filter,
+                    (key, value) -> !collection.contains(new AbstractMap.SimpleImmutableEntry<>(value, key)));
+            }
+
+            @Override
+            public void clear() {
+                removeFilteredEntries(filter, (key, value) -> true);
+            }
+        };
+    }
+
+    private Set<UUID> filteredKeySet(BiPredicate<UUID, T> filter) {
+        return new AbstractSet<>() {
+            @Override
+            public Iterator<UUID> iterator() {
+                Iterator<Map.Entry<UUID, T>> entries = filteredEntrySet(filter).iterator();
+                return new Iterator<>() {
+                    @Override
+                    public boolean hasNext() {
+                        return entries.hasNext();
+                    }
+
+                    @Override
+                    public UUID next() {
+                        return entries.next().getKey();
+                    }
+
+                    @Override
+                    public void remove() {
+                        throw new UnsupportedOperationException();
+                    }
+                };
+            }
+
+            @Override
+            public int size() {
+                return filteredSize(filter);
+            }
+
+            @Override
+            public boolean contains(Object key) {
+                return database.containsKey(key) && filter.test((UUID) key, database.get(key));
+            }
+
+            @Override
+            public boolean remove(Object key) {
+                if (!contains(key)) {
+                    return false;
+                }
+                UuidDatabase.this.remove(key);
+                return true;
+            }
+
+            @Override
+            public boolean removeAll(Collection<?> collection) {
+                Objects.requireNonNull(collection);
+                return removeFilteredEntries(filter, (key, value) -> collection.contains(key));
+            }
+
+            @Override
+            public boolean retainAll(Collection<?> collection) {
+                Objects.requireNonNull(collection);
+                return removeFilteredEntries(filter, (key, value) -> !collection.contains(key));
+            }
+
+            @Override
+            public void clear() {
+                removeFilteredEntries(filter, (key, value) -> true);
+            }
+        };
+    }
+
+    private Set<T> filteredInverseKeySet(BiPredicate<UUID, T> filter) {
+        return new AbstractSet<>() {
+            @Override
+            public Iterator<T> iterator() {
+                Iterator<Map.Entry<T, UUID>> entries = filteredInverseEntrySet(filter).iterator();
+                return new Iterator<>() {
+                    @Override
+                    public boolean hasNext() {
+                        return entries.hasNext();
+                    }
+
+                    @Override
+                    public T next() {
+                        return entries.next().getKey();
+                    }
+
+                    @Override
+                    public void remove() {
+                        throw new UnsupportedOperationException();
+                    }
+                };
+            }
+
+            @Override
+            public int size() {
+                return filteredSize(filter);
+            }
+
+            @Override
+            public boolean contains(Object value) {
+                if (!reverseDatabase.containsKey(value)) {
+                    return false;
+                }
+                UUID key = reverseDatabase.get(value);
+                return filter.test(key, database.get(key));
+            }
+
+            @Override
+            public boolean remove(Object value) {
+                if (!contains(value)) {
+                    return false;
+                }
+                inverseView.remove(value);
+                return true;
+            }
+
+            @Override
+            public boolean removeAll(Collection<?> collection) {
+                Objects.requireNonNull(collection);
+                return removeFilteredEntries(filter, (key, value) -> collection.contains(value));
+            }
+
+            @Override
+            public boolean retainAll(Collection<?> collection) {
+                Objects.requireNonNull(collection);
+                return removeFilteredEntries(filter, (key, value) -> !collection.contains(value));
+            }
+
+            @Override
+            public void clear() {
+                removeFilteredEntries(filter, (key, value) -> true);
+            }
+        };
+    }
+
+    private Map.Entry<UUID, T> filteredForwardEntry(UUID key, BiPredicate<UUID, T> filter) {
+        return new Map.Entry<>() {
+            @Override
+            public UUID getKey() {
+                return key;
+            }
+
+            @Override
+            public T getValue() {
+                return database.get(key);
+            }
+
+            @Override
+            public T setValue(T value) {
+                if (!filter.test(key, value)) {
+                    throw new IllegalArgumentException("Entry does not match filter");
+                }
+                return UuidDatabase.this.put(key, value);
+            }
+
+            @Override
+            public boolean equals(Object other) {
+                return other instanceof Map.Entry<?, ?> entry
+                    && Objects.equals(key, entry.getKey())
+                    && Objects.equals(getValue(), entry.getValue());
+            }
+
+            @Override
+            public int hashCode() {
+                return Objects.hashCode(key) ^ Objects.hashCode(getValue());
+            }
+        };
+    }
+
+    private Map.Entry<T, UUID> filteredInverseEntry(T value, BiPredicate<UUID, T> filter) {
+        return new Map.Entry<>() {
+            @Override
+            public T getKey() {
+                return value;
+            }
+
+            @Override
+            public UUID getValue() {
+                return reverseDatabase.get(value);
+            }
+
+            @Override
+            public UUID setValue(UUID key) {
+                if (!filter.test(key, value)) {
+                    throw new IllegalArgumentException("Entry does not match filter");
+                }
+                return inverseView.put(value, key);
+            }
+
+            @Override
+            public boolean equals(Object other) {
+                return other instanceof Map.Entry<?, ?> entry
+                    && Objects.equals(value, entry.getKey())
+                    && Objects.equals(getValue(), entry.getValue());
+            }
+
+            @Override
+            public int hashCode() {
+                return Objects.hashCode(value) ^ Objects.hashCode(getValue());
+            }
+        };
+    }
+
+    private int filteredSize(BiPredicate<UUID, T> filter) {
+        int size = 0;
+        for (Map.Entry<UUID, T> entry : database.entrySet()) {
+            if (filter.test(entry.getKey(), entry.getValue())) {
+                size++;
+            }
+        }
+        return size;
+    }
+
+    private boolean removeFilteredEntries(BiPredicate<UUID, T> filter, BiPredicate<UUID, T> removeIf) {
+        boolean changed = false;
+        Iterator<Map.Entry<UUID, T>> iterator = database.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<UUID, T> entry = iterator.next();
+            UUID key = entry.getKey();
+            T value = entry.getValue();
+            if (filter.test(key, value) && removeIf.test(key, value)) {
+                iterator.remove();
+                reverseDatabase.remove(value);
+                changed = true;
+            }
+        }
+        return changed;
     }
 }
