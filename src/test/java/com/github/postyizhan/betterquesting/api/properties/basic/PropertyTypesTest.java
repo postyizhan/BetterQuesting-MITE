@@ -3,6 +3,7 @@ package com.github.postyizhan.betterquesting.api.properties.basic;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.github.postyizhan.betterquesting.api.enums.EnumLogic;
+import com.github.postyizhan.betterquesting.api.enums.EnumQuestVisibility;
 import com.github.postyizhan.betterquesting.api.util.ResourceKey;
 import net.minecraft.NBTBase;
 import net.minecraft.NBTTagByte;
@@ -11,8 +12,13 @@ import net.minecraft.NBTTagDouble;
 import net.minecraft.NBTTagFloat;
 import net.minecraft.NBTTagInt;
 import net.minecraft.NBTTagLong;
+import net.minecraft.NBTTagShort;
 import net.minecraft.NBTTagString;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class PropertyTypesTest {
     private static final ResourceKey KEY = ResourceKey.parse("betterquesting:test");
@@ -63,20 +69,36 @@ class PropertyTypesTest {
         assertEquals(EnumLogic.AND, enums.readValue(enums.writeValue(null)));
     }
 
-    @Test
-    void numericReadsKeepUpstreamNarrowingSemantics() {
-        PropertyTypeInteger integers = new PropertyTypeInteger(KEY, 0);
-        PropertyTypeByte bytes = new PropertyTypeByte(KEY, (byte) 0);
-        PropertyTypeBoolean bool = new PropertyTypeBoolean(KEY, false);
+    @ParameterizedTest(name = "numeric tag {0} follows NBTPrimitive conversions")
+    @MethodSource("numericReadCases")
+    void numericReadsMatchUpstreamNbtPrimitiveSemantics(
+        String ignoredName, NBTBase tag, byte expectedByte, int expectedInt, float expectedFloat,
+        double expectedDouble, boolean expectedBoolean) {
+        assertEquals(expectedByte, new PropertyTypeByte(KEY, (byte) 0).readValue(tag));
+        assertEquals(expectedInt, new PropertyTypeInteger(KEY, 0).readValue(tag));
+        assertEquals(expectedFloat, new PropertyTypeFloat(KEY, 0F).readValue(tag));
+        assertEquals(expectedDouble, new PropertyTypeDouble(KEY, 0D).readValue(tag));
+        assertEquals(expectedBoolean, new PropertyTypeBoolean(KEY, false).readValue(tag));
+    }
 
-        assertEquals(-4, integers.readValue(new NBTTagDouble("", -3.7D)));
-        assertEquals((byte) -4, bytes.readValue(new NBTTagDouble("", -3.7D)));
-        assertEquals(-4, integers.readValue(new NBTTagFloat("", -3.7F)));
-        assertEquals(3, integers.readValue(new NBTTagDouble("", 3.7D)));
-        assertEquals((byte) 44, bytes.readValue(new NBTTagInt("", 300)));
-        assertEquals(false, bool.readValue(new NBTTagInt("", 256)));
-        assertEquals(true, bool.readValue(new NBTTagInt("", 1)));
-        assertEquals(-1, integers.readValue(new NBTTagLong("", Long.MAX_VALUE)));
+    private static Stream<Arguments> numericReadCases() {
+        return Stream.of(
+            Arguments.of("byte", new NBTTagByte("", (byte) -2), (byte) -2, -2, -2F, -2D, false),
+            Arguments.of("short", new NBTTagShort("", (short) 258), (byte) 2, 258, 258F, 258D, true),
+            Arguments.of("int", new NBTTagInt("", 300), (byte) 44, 300, 300F, 300D, true),
+            Arguments.of("long", new NBTTagLong("", Long.MAX_VALUE), (byte) -1, -1,
+                (float) Long.MAX_VALUE, (double) Long.MAX_VALUE, false),
+            Arguments.of("float", new NBTTagFloat("", -3.7F), (byte) -4, -4, -3.7F, (double) -3.7F, false),
+            Arguments.of("double", new NBTTagDouble("", 3.7D), (byte) 3, 3, 3.7F, 3.7D, true));
+    }
+
+    @Test
+    void enumReadsAreCaseSensitiveAndFallBackToDefault() {
+        PropertyTypeEnum<EnumQuestVisibility> visibility = new PropertyTypeEnum<>(
+            KEY, EnumQuestVisibility.NORMAL);
+        assertEquals(EnumQuestVisibility.NORMAL, visibility.readValue(new NBTTagString("", "XOR")));
+        assertEquals(EnumQuestVisibility.NORMAL, visibility.readValue(new NBTTagString("", "normal")));
+        assertEquals(EnumQuestVisibility.HIDDEN, visibility.readValue(new NBTTagString("", "HIDDEN")));
     }
 
     @Test

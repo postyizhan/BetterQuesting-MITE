@@ -45,6 +45,56 @@ class PropertyContainerTest {
     }
 
     @Test
+    void mergeReplacesSameNameTagsWhenOnlyOneSideIsCompound() {
+        PropertyContainer container = new PropertyContainer();
+        NBTTagCompound scalarTarget = new NBTTagCompound();
+        scalarTarget.setString("betterquesting", "scalar");
+        container.setProperty(NAME, "compound");
+        container.writeToNBT(scalarTarget);
+        assertEquals(10, scalarTarget.getTag("betterquesting").getId());
+        assertEquals("compound", scalarTarget.getCompoundTag("betterquesting").getString("name"));
+
+        NBTTagCompound rawScalarSource = new NBTTagCompound();
+        rawScalarSource.setString("betterquesting", "scalar");
+        PropertyContainer restored = new PropertyContainer();
+        restored.readFromNBT(rawScalarSource);
+        NBTTagCompound overwriteCompound = new NBTTagCompound();
+        NBTTagCompound oldDomain = new NBTTagCompound();
+        oldDomain.setString("old", "value");
+        overwriteCompound.setTag("betterquesting", oldDomain);
+        restored.writeToNBT(overwriteCompound);
+        assertEquals(8, overwriteCompound.getTag("betterquesting").getId());
+        assertEquals("scalar", overwriteCompound.getString("betterquesting"));
+    }
+
+    @Test
+    void readReplacesAllDomainsAndRemovingFinalPropertyOmitsDomain() {
+        PropertyContainer container = new PropertyContainer();
+        NBTTagCompound first = new NBTTagCompound();
+        NBTTagCompound firstDomain = new NBTTagCompound();
+        firstDomain.setString("name", "first");
+        first.setTag("betterquesting", firstDomain);
+        NBTTagCompound secondDomain = new NBTTagCompound();
+        secondDomain.setInteger("count", 2);
+        first.setTag("other", secondDomain);
+        container.readFromNBT(first);
+        assertEquals("first", container.getProperty(NAME));
+        assertEquals(2, container.getProperty(COUNT));
+
+        NBTTagCompound replacement = new NBTTagCompound();
+        NBTTagCompound replacementDomain = new NBTTagCompound();
+        replacementDomain.setString("name", "replacement");
+        replacement.setTag("betterquesting", replacementDomain);
+        container.readFromNBT(replacement);
+        assertEquals("replacement", container.getProperty(NAME));
+        assertEquals(-1, container.getProperty(COUNT));
+        assertFalse(container.writeToNBT(new NBTTagCompound()).hasKey("other"));
+
+        container.removeProperty(NAME);
+        assertFalse(container.writeToNBT(new NBTTagCompound()).hasKey("betterquesting"));
+    }
+
+    @Test
     void nbtRoundTripUsesDeepCopyAndMergesNestedDomains() {
         PropertyContainer source = new PropertyContainer();
         source.setProperty(NAME, "source");
