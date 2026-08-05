@@ -6,6 +6,7 @@ import com.github.postyizhan.betterquesting.api.properties.NativeProps;
 import com.github.postyizhan.betterquesting.api.questing.IQuest.RequirementType;
 import com.github.postyizhan.betterquesting.api.util.NbtUuid.UuidValueType;
 import com.github.postyizhan.betterquesting.api.util.UuidConverter;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -134,6 +135,38 @@ class QuestInstanceTest {
 
         NBTTagList written = (NBTTagList) quest.writeToNBT(new NBTTagCompound()).getTag("preRequisites");
         assertEquals(1, written.tagCount());
+    }
+
+    @Test
+    void corruptProgressRecordIsSkippedWithoutAbortingLaterRecords() {
+        UUID valid = UUID.randomUUID();
+
+        NBTTagList completed = new NBTTagList();
+        NBTTagCompound corrupt = new NBTTagCompound();
+        corrupt.setString("uuid", "not-a-uuid");
+        corrupt.setBoolean("claimed", true);
+        completed.appendTag(corrupt);
+        NBTTagCompound good = new NBTTagCompound();
+        good.setString("uuid", valid.toString());
+        good.setBoolean("claimed", true);
+        good.setLong("timestamp", 42L);
+        completed.appendTag(good);
+
+        NBTTagCompound progress = new NBTTagCompound();
+        progress.setTag("completed", completed);
+        progress.setTag("tasks", new NBTTagList());
+
+        QuestInstance quest = new QuestInstance();
+        quest.readProgressFromNBT(progress, false);
+
+        // Locks the recovery contract: a corrupt record is dropped and the record after it still loads.
+        // This input throws IllegalArgumentException, so it does not by itself prove the catch must be broad;
+        // that width matches upstream, which catches Exception so untrusted save data can never abort the read.
+        assertTrue(quest.isComplete(valid));
+        assertTrue(quest.hasClaimed(valid));
+        Set<UUID> loaded = new HashSet<>();
+        quest.getUsersWithCompletionData(loaded);
+        assertEquals(Set.of(valid), loaded);
     }
 
     private static NBTTagCompound requirementTag(UUID id, RequirementType type) {

@@ -25,8 +25,12 @@ import java.util.Set;
 import java.util.UUID;
 import net.minecraft.NBTTagCompound;
 import net.minecraft.NBTTagList;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class QuestInstance implements IQuest {
+    private static final Logger LOGGER = LogManager.getLogger("BetterQuesting/QuestInstance");
+
     private final TaskStorage tasks = new TaskStorage();
     private final RewardStorage rewards = new RewardStorage();
     private final Map<UUID, NBTTagCompound> completeUsers = new HashMap<>();
@@ -282,8 +286,10 @@ public class QuestInstance implements IQuest {
                 NBTTagCompound entry = (NBTTagCompound) item.copy();
                 try {
                     completeUsers.put(UUID.fromString(entry.getString("uuid")), entry);
-                } catch (IllegalArgumentException ignored) {
-                    // Corrupt progress records are skipped, matching upstream's logged recovery behavior.
+                } catch (Exception exception) {
+                    // Matches upstream: one corrupt record must not abort the whole progress file. The broad
+                    // catch is deliberate because the failure modes are untrusted save data, not logic errors.
+                    LOGGER.error("Unable to load UUID for quest progress record {}", i, exception);
                 }
             }
             tasks.readProgressFromNBT(NbtCompat.getListOrEmpty(nbt, "tasks"), merge);
