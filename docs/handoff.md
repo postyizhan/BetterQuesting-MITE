@@ -6,8 +6,8 @@
 
 ## 当前真实基线
 
-- HEAD 共 18 个提交，相对 `origin/main` ahead 17 个。
-- 工作树干净；最近提交信息为 `feat: 建立世界目录解析与原子写入存储层`。
+- HEAD 共 21 个提交，相对 `origin/main` ahead 20 个。
+- 工作树干净；最近提交信息为 `docs: 修正 Gson 2.2.2 可用 API 边界并对齐 lookup 缓存初始容量`。
 - 不要把具体易变化的 HEAD hash 写入交接文档，提交信息可以记录。
 
 ---
@@ -99,7 +99,7 @@
 
 ## 3. 当前状态
 
-最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，23 个测试类、168 个测试全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2。
+最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，23 个测试类、169 个测试全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2，依赖运行时可用性见 §5.5。
 
 ### 已完成
 
@@ -238,7 +238,7 @@ accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
 
 ## 5. 平台关键事实
 
-完整证据链对 §5.1 与 §5.4 成立，证据在 `docs/platform-probes.md`。§5.2/§5.3 的结论由当前代码注释、测试及本项目字节码核实记录锁定，但尚未整理进 `docs/platform-probes.md`。这里是最容易踩的四条。
+完整证据链对 §5.1、§5.4 与 §5.5 成立，证据在 `docs/platform-probes.md`。§5.2/§5.3 的结论由当前代码注释、测试及本项目字节码核实记录锁定，但尚未整理进 `docs/platform-probes.md`。这里是最容易踩的五条。
 
 ### 5.1 `ResourceLocation` 不能当逻辑 ID（blocker）
 
@@ -284,6 +284,29 @@ MITE 的 `ResourceLocation` 构造器会把实例登记进静态待校验队列�
 MITE 的 `ChatAllowedCharacters.allowedCharacters` 是 **`String`**，内容来自客户端资源 `/font.txt`。字符数组字段叫 `allowedCharactersArray`，而它的内容其实是 **15 个禁用字符**（字段名有误导性）：`/`、`\n`、`\r`、`\t`、`\0`、`\f`、`` ` ``、`?`、`*`、`\`、`<`、`>`、`|`、`"`、`:`。
 
 上游 `JsonHelper.makeFileNameSafe` 遍历的是 1.7.10 中 `char[]` 类型的 `allowedCharacters`，对应 MITE 的 `allowedCharactersArray`，**不是**同名 String 字段。照搬会同时犯两个错：把客户端 `/font.txt` 资源依赖引进服务端，以及用完全错误的过滤集。该禁用集也不含 Windows 保留设备名，`StoragePaths` 另行拒绝了 `CON`/`NUL`/`AUX`/`PRN`/`COM1-9`/`LPT1-9`。
+
+### 5.5 编译期成功不等于运行时可用（已踩一次）
+
+**这是一整类风险，不是单个 bug。** 完整证据在 `docs/platform-probes.md` 的「依赖运行时可用性」。
+
+本会话发现阶段 2 已提交的 `NaiveLookupLogic` 在用 fastutil 的 `Int2ObjectOpenHashMap`，而 fastutil **完全不在运行时 classpath 上**：不在游戏 jar、不在 launcher libraries、不在 FishModLoader/RustedIronCore/ManyLib，我们的产物 jar 里也是 0 个类。这会在首次 quest 批量查找时 `NoClassDefFoundError`。已改为 JDK `HashMap`。
+
+为什么能溜进来：`build.gradle` 用 `implementation` 声明了 fastutil，编译通过、测试全绿（测试跑在完整 Gradle classpath 上），但玩家侧根本没有这个库。**测试绿不能证明运行时可用。**
+
+为什么不能靠打包解决：本项目只有 `jar` 任务、**没有 `remapJar`**，而 Fabric 的 jar-in-jar 嵌套发生在 remapJar 阶段，所以 Loom 的 `include` 配置在当前构建下不生效。ModdedMITE maven 上的 `FastUtil:8.5.12` 也只有空壳 POM、没有 jar。
+
+同一次排查还发现 Gson 是**版本**错配而非缺失：编译期解析到 2.11.0，运行期只有 2.2.2（`JsonObject.members` 字段类型为 `internal.StringMap` 锁定，且 launcher libraries 声明 `gson:2.2.2`）。已把 `build.gradle` 固定为 2.2.2，让编译器直接拦住不存在的 API。**阶段 3 序列化批次必须先读 `platform-probes.md` 的 2.2.2 可用 API 清单**，上游 1.7.10 用到的 `JsonParser.parseString`、`JsonArray.remove/isEmpty`、`JsonObject.keySet/size` 等一概不能照搬。
+
+已核实的全部外部包提供者（新增依赖前照此格式先核实）：
+
+| 外部包 | 运行时提供者 | `fml.mod.json` 已声明 |
+|---|---|---|
+| `huix.glacier.*`、`moddedmite.rustedironcore.*` | RustedIronCore | 是 |
+| `net.fabricmc.api`、`net.xiaoyu233.fml`、`org.apache.logging.log4j`、`org.spongepowered.asm.mixin` | FishModLoader | 是 |
+| `com.google.gson` | 游戏 jar 内嵌 2.2.2 | 平台提供 |
+| `net.minecraft.*` | 游戏 jar | — |
+
+注意 `org.apache.logging.log4j` 由 FishModLoader 提供，**不是** MC 1.6.4 自带（vanilla 1.6.4 用的是 `ILogAgent`，log4j2 是 1.7.x 才进 Minecraft 的）。
 
 ---
 
