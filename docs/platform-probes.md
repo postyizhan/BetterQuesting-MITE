@@ -11,7 +11,30 @@
 
 ## Access Widener 状态
 
-`src/main/resources/betterquesting.accesswidener` 当前只有 `accessWidener v2 named` header。阶段 0/1 没有开放项是有意状态：现有生命周期与网络探针不需要扩大成员可见性。未来若确需开放成员，每一项都必须先从当前 mapped JAR 核对 owner、成员名和真实 mapped descriptor；不得从其他 Minecraft 版本猜测 descriptor，也不得添加占位规则。
+`src/main/resources/betterquesting.accesswidener` 已落地：
+
+```text
+accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
+```
+
+该 owner、成员名与 descriptor 已从当前 mapped JAR 核对。`ISaveHandler` 不声明 `getWorldDirectory()`，因此平台适配先防御性检查并转换为 `SaveHandler`。运行时由 `fml.mod.json` 的 `"accessWidener": "betterquesting.accesswidener"` 键接线；后续新增开放项仍必须逐项从当前 mapped JAR 核对，不得从其他 Minecraft 版本猜测。
+
+## 世界目录解析
+
+以下事实链已由当前 mapped JAR 与对应实现核对：
+
+- `MinecraftServer.worldServers` 是 public 数组，overworld 可从索引 0 获取；`World.getSaveHandler()` 是 public。
+- `SaveFormatOld.getSaveLoader(...)` 返回 `SaveHandler`，`AnvilSaveConverter.getSaveLoader(...)` 返回 `AnvilSaveHandler`，而后者继承 `SaveHandler`。因此 `instanceof SaveHandler` 在专服和集成服的正常世界存档路径都成立，禁用分支仅用于防御未知实现。
+- `SaveHandlerMP` 不继承 `SaveHandler`，不能视为可提供本地世界目录的实现。
+- 不得使用 `MinecraftServer.getFile()` 拼接世界存档路径；BQ 必须从 overworld 的 save handler 取得真实世界目录。
+
+`MiteWorldStorage` 是世界生命周期绑定对象：集成服务器每次进入世界都会创建新的 server/save handler，实例必须在 world load 后创建并在 unload 时废弃，不能静态跨世界缓存。
+
+## ChatAllowedCharacters 陷阱
+
+MITE 的 `ChatAllowedCharacters.allowedCharacters` 是 `String`，内容来自客户端资源 `/font.txt`；对应的字符数组字段是 `allowedCharactersArray`，其内容是 15 个禁用字符：`/`、换行、回车、制表、NUL、换页、反引号、`?`、`*`、反斜杠、`<`、`>`、`|`、`"`、`:`。
+
+上游 `makeFileNameSafe` 遍历的是 1.7.10 中 `char[]` 类型的 `allowedCharacters`。后续移植文件名安全化时不得引用 MITE 的同名 `String` 字段，否则既会把客户端 `/font.txt` 资源依赖引入服务端，又会使用完全错误的过滤集。上述禁用集也不包含 Windows 保留设备名 `CON`、`NUL`、`AUX`、`PRN`、`COM1` 等，路径边界必须另行拒绝这些名称。
 
 ## 专服生命周期
 
