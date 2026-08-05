@@ -4,6 +4,12 @@
 
 读完本文后，按顺序再读 `plan.md`（总体移植计划）和 `docs/platform-probes.md`（平台事实与 blocker）。`docs/source-migration-ledger.md` 是上游源码台账，需要排期时再查。
 
+## 当前真实基线
+
+- HEAD 共 17 个提交，相对 `origin/main` ahead 16 个。
+- 工作树干净；最近提交信息为 `docs: 更新阶段三交接状态与后续顺序`。
+- 不要把具体易变化的 HEAD hash 写入交接文档，提交信息可以记录。
+
 ---
 
 ## 1. 硬要求：必须积极使用子代理
@@ -49,8 +55,6 @@
 
 ## 2. 子代理配置
 
-两个 agent 已配置好，直接用：
-
 两个 agent 已配置好，直接用。以下是配置文件里的实际值：
 
 **`bq.bq-port-writer`** — 唯一写入者，`acceptanceRole: writer`
@@ -87,9 +91,7 @@
 
 ## 3. 当前状态
 
-当前 HEAD 共 16 个提交（相对 `origin/main` 领先 15 个）；`PlayerIdentityService` 批次已提交，提交信息为 `feat: 建立玩家身份派生与旧档隔离映射`。本次文档改动之外没有其他实现批次需要从工作树接手。
-
-最近一次验证为 `./gradlew clean build --console=plain` 通过，22 个测试类、156 个测试全绿；RFC 4122 UUIDv5 测试向量另经 Python `uuid.uuid5` 独立核对一致。S3AI Claude 初审发现的问题已全部修正，复审结论为 `No blocking issues`。审核修正包括：限制 `mergeLegacy` 只能合并到已有 legacy 映射的目标、补齐解析结果四字段值语义、将平台规则外用户名改为可报告的 unresolved 结果、隔离 `EntityPlayer.getEntityName()` 返回 null 的平台边界并报告为 `<null>`、明确内存映射禁止提前驱动 identity-keyed 进度存档，以及补充玩家名大小写的平台字节码证据。保留决定包括：继续使用 `Locale.ROOT` 大小写折叠、用户名下界保持 1 字符、`PlayerIdentityService` 继续位于 `platform/api`。
+最近一次构建、测试与审核基线见 §4.1：`./gradlew clean build --console=plain` 通过，22 个测试类、156 个测试全绿；RFC 4122 UUIDv5 测试向量另经 Python `uuid.uuid5` 独立核对一致，S3AI Claude 复审结论为 `No blocking issues`。
 
 ### 已完成
 
@@ -117,29 +119,30 @@
 
 按 plan.md §13 首轮实施顺序的第 5 步走。
 
-### 4.1 `PlayerIdentityService`（批次已提交，S3AI Claude 复审通过）
+### 4.1 身份服务（已完成）
 
-**先读 plan.md §5 阶段 3 第 7 条的硬要求**：优先使用可验证的 MITE/GameProfile/服务端持久身份。若只能取得用户名或离线派生 UUID，**不得自动声称可识别改名玩家**；歧义数据应隔离并要求管理员通过映射表确认，迁移报告记录来源和决定。
+`PlayerIdentityService` 批次已实现、提交并经过 S3AI/`claude-opus-5` 初审；问题修正后复审结论为 `No blocking issues`。实际文件如下：
 
-本会话已完成并提交首批实现，且已通过异源复审。新增文件可概括为：
+- `src/main/java/com/github/postyizhan/betterquesting/platform/api/PlayerIdentity.java`
+- `src/main/java/com/github/postyizhan/betterquesting/platform/api/PlayerIdentityResolution.java`
+- `src/main/java/com/github/postyizhan/betterquesting/platform/api/PlayerIdentitySource.java`
+- `src/main/java/com/github/postyizhan/betterquesting/platform/api/PlayerIdentityService.java`
+- `src/main/java/com/github/postyizhan/betterquesting/platform/api/IdentityMappingConflictException.java`
+- `src/main/java/com/github/postyizhan/betterquesting/core/identity/DeterministicPlayerIdentityService.java`
+- `src/main/java/com/github/postyizhan/betterquesting/platform/fml/MitePlayerIdentityAdapter.java`
+- `src/test/java/com/github/postyizhan/betterquesting/core/identity/DeterministicPlayerIdentityServiceTest.java`
 
-- `platform/api`：身份值对象、解析结果、来源枚举、服务接口及映射冲突异常。
-- `core/identity/DeterministicPlayerIdentityService`：确定性身份解析与管理员映射/合并逻辑。
-- `platform/fml/MitePlayerIdentityAdapter`：MITE 玩家对象适配。
-- `src/test/.../core/identity/DeterministicPlayerIdentityServiceTest`：规范化、UUIDv5、隔离、映射与冲突测试。
+已实现语义：规范化后的保守 ASCII 用户名使用固定 namespace 派生 RFC 4122 UUIDv5；旧档真实 UUID 默认隔离，不按用户名或派生 UUID 自动认领；管理员显式 `map`/`merge`/`replace` 才能建立或改变映射，冲突显式报错；`merge` 只能指向已有 legacy 映射。解析结果保留 legacy UUID、identity、source、decision 四字段值语义。MITE adapter 只调用已由 `javap` 验证的 `EntityPlayer.getEntityName()`。
 
-已实现语义：
+验证：`./gradlew clean build --console=plain` 通过，22 个测试类、156 个测试全绿（0 failure、0 error、0 skipped）；RFC 4122 UUIDv5 向量另经 Python `uuid.uuid5` 核对；S3AI/Claude 复审为 `No blocking issues`。
 
-- 先规范化用户名，再用固定 namespace 按 RFC 4122 UUIDv5 确定性派生逻辑身份；namespace 不随世界或运行实例变化。
-- 上游存档中的旧真实 UUID 默认保持隔离，绝不按用户名或派生 UUID 自动认领。
-- 只有管理员显式执行 `map`/`merge`，旧真实 UUID 数据才会关联或合并到当前逻辑身份；冲突会显式报错。
-- MITE adapter 只读取经 `javap` 验证的 `EntityPlayer.getEntityName()`，不虚构平台不存在的 GameProfile/UUID 能力。
+关键身份契约：MITE 字节码显示 `NetLoginHandler` 只调用 `stripControlCodes`；`ServerConfigurationManager` 在线玩家比较使用 `equalsIgnoreCase`；`SaveHandler` 按原始名称拼接 `.dat`。因此 `Locale.ROOT` 小写折叠是 Windows 存档与在线身份契约，但不能声称它能让大小写敏感文件系统自动兼容两份仅大小写不同的历史存档。规则外运行时名称返回 `UNSUPPORTED_USERNAME` unresolved 结果；管理员 `map`/`merge`/`replace` 操作对规则外名称抛出 `IllegalArgumentException`，两类行为不能混淆。
 
-验证状态：`./gradlew clean build --console=plain` 通过；22 个测试类、156 个测试全绿，0 failure、0 error、0 skipped。
+保留决定：继续使用 `Locale.ROOT` 折叠；用户名下界保持 1 字符，不猜测 3 字符；`PlayerIdentityService` 继续放在 `platform/api`。这些放置与边界均来自 plan.md §4.2 的平台能力接口设计。null adapter 仍以 `<null>` 隔离并报告。
 
-**审核/提交状态**：S3AI Claude 初审发现的问题已修正，复审结论为 `No blocking issues`；`PlayerIdentityService` 批次已通过提交 `feat: 建立玩家身份派生与旧档隔离映射` 落盘。修正决定为：`mergeLegacy` 不得凭新名字创建合并目标；解析结果实现四字段值语义；真实平台输入遇到保守规则外名称时返回 `UNSUPPORTED_USERNAME`，其中 `EntityPlayer.getEntityName()` 返回 null 时由 adapter 隔离并以稳定文本 `<null>` 报告；管理员映射操作仍失败；持久化与追加审计明确推迟到 WorldStorage/迁移批次。保留决定为：大小写折叠符合在线玩家 `equalsIgnoreCase` 与目标 Windows 文件系统契约；`[A-Za-z0-9_]{1,16}` 不猜测 3 字符下界；plan.md §4.2 已明确身份服务属于平台能力接口，因此不移包。
+当前映射是**内存态**，重启不保留；WorldStorage 和迁移持久化完成前，禁止任何 identity-keyed progress 写入。`merge` 只能指向已有 legacy 映射，不能借此创建隐式目标。
 
-此前及本批次确认的平台事实：
+#### 已实现的身份解析细节
 
 - MITE `EntityPlayer` 上**没有** `GameProfile`，也没有 UUID 访问器。
 - MITE 1.6.4 早于 Mojang 的 UUID 迁移，可验证身份**只有用户名**。
@@ -149,28 +152,50 @@
 
 ### 4.2 `WorldStorage`
 
-已由字节码确认的路径（记录在 `docs/platform-probes.md`）：
+主代理独立 `javap` 复核得到的字节码事实：
 
 - Forge 的 `DimensionManager` 在 MITE 不可用。
 - `MinecraftServer.worldServers` 是 public 数组。
-- `World.saveHandler` 是 protected，需要一条 access widener 或 accessor mixin 才能取到。
-- `ISaveHandler.getWorldDirectory()` 返回世界根目录，接口上还有 `flush()`。
+- `World` 有 public `ISaveHandler getSaveHandler()`，无需开放其 protected `saveHandler` 字段。
+- `ISaveHandler` 不声明 `getWorldDirectory()`；它声明的是 public `getWorldDirectoryName()` 和 `flush()`。
+- 具体类 `SaveHandler` 有 protected `File getWorldDirectory()`。
 - 不要用 `MinecraftServer.getFile()` 拼 `saves/<name>`——专服与集成服务器下语义不同。
 
-结论路径：`worldServers[0].saveHandler.getWorldDirectory()`。
+结论路径：先取 `worldServers[0].getSaveHandler()`，运行时验证并 cast 为 `SaveHandler`，再通过 access widener 开放 protected `SaveHandler.getWorldDirectory()`，或使用 invoker/accessor mixin。落 access widener 规则前，必须从当前 mapped JAR 核对 owner、方法名和真实 descriptor，不得跨版本猜测。运行时若 `ISaveHandler` 实际实现不是 `SaveHandler`，必须显式禁用存档并报告；不得触发 `ClassCastException`，也不得猜测目录路径。不得写成 `ISaveHandler.getWorldDirectory()`。
 
-### 4.3 存档层其余工作
+### 4.3 存档/迁移剩余
 
-- 原子写入：临时文件 → 关闭/同步 → 替换；覆盖旧档前建带时间戳备份。
-- 注意 `ATOMIC_MOVE` 在 Windows 跨卷时可能不可用，需要回退路径。
-- golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度、损坏/截断/超大文件。
-- `QuestLoot.json` 阶段 3 **只做识别、备份和不透明保留**；语义解析等阶段 7 的 LootRegistry。
+按当前优先级实施，以下项目均未完成，不得在后续报告中声称已落地：
+
+1. 完成 `WorldStorage` 世界目录解析及所需 access widener 或 invoker/accessor。
+2. 持久化身份映射并建立追加审计；迁移报告必须记录身份来源和管理员决定，这是 plan.md 阶段 3 第 7 条的硬要求。
+3. 保留原 `format`、`build`、任务 ID、属性 key 和 UUID 表示，另增 `mitePortFormat` 表示移植端 schema。
+4. 实现原子文件写入与带时间戳备份：临时文件 → 关闭/同步 → 替换；Windows 上 `ATOMIC_MOVE` 跨卷不可用时必须有回退路径。
+5. 建立 JSON/NBT golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度、损坏/截断/超大文件。
+6. 实现 `LegacyQuestImporter`；旧 `QuestProgress.json` 转换为逐玩家文件后必须保留原件。
+7. 周期 autosave、world save、server stop 均触发 flush；server stop 必须等待待处理 I/O 完成。
+8. 目标平台缺失物品、实体、维度等内容时生成 placeholder 和迁移报告，不得静默替换成其他内容。
+9. 最后接回 `NameCache`/`QuestCache`；`IQuestSettings.canUserEdit` 随 `NameCache` 后续处理，不能遗漏或让网络/GUI 假设权限检查已存在。
+
+`QuestLoot.json` 在阶段 3 **只做识别、备份和不透明保留**；语义解析等阶段 7 的 LootRegistry。
+
+### 4.4 下一会话首轮动作
+
+1. 先核对 `git status`、`git log` 和当前测试数。
+2. 再读取 `plan.md` 阶段 3 与 `docs/platform-probes.md`。
+3. 按上述优先级派 writer 实现一个批次。
+4. 派 S3AI Claude reviewer 复审该批次。
+5. 主代理核实相关 `javap` owner/字段/descriptor 与测试结果，再提交。
+
+### 4.5 已知残余风险
+
+身份映射尚未持久化；尚无追加审计；adapter 尚未用真实 `EntityPlayer` 做测试；container GUI blocker 仍存在。
 
 ---
 
 ## 5. 平台关键事实
 
-完整证据链在 `docs/platform-probes.md`。这里是最容易踩的两条。
+完整证据链仅对 §5.1 成立，证据在 `docs/platform-probes.md`。§5.2/§5.3 的结论由当前代码注释、测试及本项目字节码核实记录锁定，但尚未整理进 `docs/platform-probes.md`。这里是最容易踩的三条。
 
 ### 5.1 `ResourceLocation` 不能当逻辑 ID（blocker）
 
@@ -254,7 +279,7 @@ grep -rln -i "eferred\|TODO" src/main/java
 | `ITask.detect` | `ParticipantInfo` | 6 |
 | `ITask.getTaskGui`/`getTaskEditor`、`IReward.getRewardGui`/`getRewardEditor` | 客户端 GUI | 5 |
 | `IReward.canClaim`/`claimReward` | 玩家身份、参与者信息 | 7 |
-| `IQuestSettings.canUserEdit` | 玩家身份、OP 权限、`NameCache` | 3/7 |
+| `IQuestSettings.canUserEdit` | 玩家身份、OP 权限、`NameCache`；随 `NameCache` 后续处理，不得遗漏 | 3/7 |
 | `PartyManager.SyncPartyQuests` × 3 + `SyncPlayerContainer` | 玩家、`QuestCache`、`NameCache` | 7 |
 | `PartyInvitations` | 阶段 4 网络处理器 | 4 |
 | `PropertyTypeItemStack`、`NativeProps.ICON`/`CONFETTI_ICON` | `BigItemStack` | 后续 |
