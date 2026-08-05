@@ -2,11 +2,12 @@ package com.github.postyizhan.betterquesting.platform.fml;
 
 import com.github.postyizhan.betterquesting.BetterQuestingMod;
 import com.github.postyizhan.betterquesting.core.storage.AtomicFileStorage;
-import com.github.postyizhan.betterquesting.core.storage.StoragePaths;
+import com.github.postyizhan.betterquesting.core.storage.WorldDataStorage;
 import com.github.postyizhan.betterquesting.platform.api.WorldStorage;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 import net.minecraft.ISaveHandler;
 import net.minecraft.SaveHandler;
@@ -22,14 +23,14 @@ import net.minecraft.server.MinecraftServer;
 public final class MiteWorldStorage implements WorldStorage {
     private static final String DATA_DIRECTORY_NAME = "betterquesting";
 
-    private final AtomicFileStorage files;
+    private final WorldDataStorage storage;
     private final Path dataDirectory;
     private final String disabledReason;
 
     private MiteWorldStorage(AtomicFileStorage files, Path dataDirectory, String disabledReason) {
-        this.files = files;
         this.dataDirectory = dataDirectory;
         this.disabledReason = disabledReason;
+        this.storage = dataDirectory == null ? null : new WorldDataStorage(dataDirectory, files);
     }
 
     public static MiteWorldStorage resolve() {
@@ -84,13 +85,38 @@ public final class MiteWorldStorage implements WorldStorage {
     }
 
     @Override
+    public boolean exists(String relativePath) throws IOException {
+        return storage().exists(relativePath);
+    }
+
+    @Override
+    public <T> Optional<T> read(String relativePath, InputReader<T> reader) throws IOException {
+        return storage().read(relativePath, reader::read);
+    }
+
+    @Override
+    public List<String> list(String relativeDirectory, String suffix) throws IOException {
+        return storage().list(relativeDirectory, suffix);
+    }
+
+    @Override
+    public boolean delete(String relativePath) throws IOException {
+        return storage().delete(relativePath);
+    }
+
+    @Override
+    public void appendLine(String relativePath, String line) throws IOException {
+        storage().appendLine(relativePath, line);
+    }
+
+    @Override
     public void writeAtomically(String relativePath, OutputWriter writer) throws IOException {
-        files.write(resolveDataPath(relativePath), writer::write);
+        storage().writeAtomically(relativePath, writer::write);
     }
 
     @Override
     public Optional<Path> backup(String relativePath) throws IOException {
-        return files.backup(resolveDataPath(relativePath));
+        return storage().backup(relativePath);
     }
 
     /**
@@ -103,9 +129,9 @@ public final class MiteWorldStorage implements WorldStorage {
         requireAvailable();
     }
 
-    private Path resolveDataPath(String relativePath) throws IOException {
+    private WorldDataStorage storage() throws IOException {
         requireAvailable();
-        return StoragePaths.resolveWithin(dataDirectory, relativePath);
+        return storage;
     }
 
     private void requireAvailable() throws IOException {
