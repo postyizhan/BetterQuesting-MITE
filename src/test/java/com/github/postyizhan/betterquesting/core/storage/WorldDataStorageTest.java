@@ -47,6 +47,17 @@ class WorldDataStorageTest {
     }
 
     @Test
+    void excludesUpstreamReadSkippedNamesFromListing() throws IOException {
+        Path players = Files.createDirectories(temporaryDirectory.resolve("players"));
+        Files.writeString(players.resolve("alice.json"), "{}");
+        Files.writeString(players.resolve("malformed_alice.json"), "{}");
+        Files.writeString(players.resolve("copy-malformed_alice.json"), "{}");
+        Files.writeString(players.resolve("alice.DS_Store.json"), "{}");
+
+        assertEquals(List.of("alice.json"), storage().list("players", ".json"));
+    }
+
+    @Test
     void distinguishesMissingFileFromEmptyFile() throws IOException {
         WorldDataStorage storage = storage();
         Optional<byte[]> missing = storage.read("missing.dat", input -> input.readAllBytes());
@@ -67,6 +78,45 @@ class WorldDataStorageTest {
     }
 
     @Test
+    void rejectsReadWhenIntermediatePathSegmentIsAFile() throws IOException {
+        Files.writeString(temporaryDirectory.resolve("players"), "not a directory");
+
+        assertThrows(IOException.class,
+            () -> storage().read("players/alice.json", input -> input.readAllBytes()));
+    }
+
+    @Test
+    void convertsNullReaderResultToIOException() throws IOException {
+        Files.writeString(temporaryDirectory.resolve("present.dat"), "data");
+
+        IOException failure = assertThrows(IOException.class,
+            () -> storage().read("present.dat", input -> null));
+
+        assertTrue(failure.getMessage().contains("present.dat"));
+    }
+
+    @Test
+    void readsCompleteUtf8Lines() throws IOException {
+        Files.writeString(temporaryDirectory.resolve("audit.log"), "first\nsecond\n",
+            StandardCharsets.UTF_8);
+
+        assertEquals(List.of("first", "second"), storage().readLines("audit.log"));
+    }
+
+    @Test
+    void readLinesDiscardsIncompleteFinalFragment() throws IOException {
+        Files.writeString(temporaryDirectory.resolve("audit.log"), "first\npartial",
+            StandardCharsets.UTF_8);
+
+        assertEquals(List.of("first"), storage().readLines("audit.log"));
+    }
+
+    @Test
+    void readLinesReturnsEmptyForMissingFile() throws IOException {
+        assertEquals(List.of(), storage().readLines("missing.log"));
+    }
+
+    @Test
     void appendsLinesInOrderWithPortableTerminators() throws IOException {
         WorldDataStorage storage = storage();
 
@@ -83,13 +133,13 @@ class WorldDataStorageTest {
         WorldDataStorage storage = storage();
 
         assertThrows(IllegalArgumentException.class,
-            () -> storage.appendLine("audit.log", "forged\nrecord"));
+            () -> storage.appendLine("audit/events.log", "forged\nrecord"));
         assertThrows(IllegalArgumentException.class,
-            () -> storage.appendLine("audit.log", "forged\rrecord"));
+            () -> storage.appendLine("audit/events.log", "forged\rrecord"));
     }
 
     @Test
-    void appendPreservesEveryExistingByteIncludingIncompleteTail() throws IOException {
+    void appendIsolatesIncompleteTailBeforeNextRecord() throws IOException {
         Path audit = temporaryDirectory.resolve("audit.log");
         byte[] original = "complete\nincomplete".getBytes(StandardCharsets.UTF_8);
         Files.write(audit, original);
@@ -97,7 +147,18 @@ class WorldDataStorageTest {
         storage().appendLine("audit.log", "next");
 
         byte[] actual = Files.readAllBytes(audit);
-        assertArrayEquals(concat(original, "next\n".getBytes(StandardCharsets.UTF_8)), actual);
+        assertArrayEquals(concat(original, "\nnext\n".getBytes(StandardCharsets.UTF_8)), actual);
+    }
+
+    @Test
+    void crashFragmentRemainsFramedForFormatParserToReject() throws IOException {
+        Files.writeString(temporaryDirectory.resolve("audit.log"), "complete\nincomplete",
+            StandardCharsets.UTF_8);
+
+        storage().appendLine("audit.log", "next");
+
+        // "incomplete" is a crash fragment; readLines frames it, while the audit parser must reject it.
+        assertEquals(List.of("complete", "incomplete", "next"), storage().readLines("audit.log"));
     }
 
     @Test
@@ -113,11 +174,20 @@ class WorldDataStorageTest {
     }
 
     @Test
+    void refusesToDeleteDirectory() throws IOException {
+        Path directory = Files.createDirectories(temporaryDirectory.resolve("players"));
+
+        assertThrows(IOException.class, () -> storage().delete("players"));
+        assertTrue(Files.isDirectory(directory));
+    }
+
+    @Test
     void rejectsTraversalForEveryNewOperation() {
         WorldDataStorage storage = storage();
 
         assertThrows(IOException.class, () -> storage.exists("../outside"));
         assertThrows(IOException.class, () -> storage.read("../outside", input -> input.readAllBytes()));
+        assertThrows(IOException.class, () -> storage.readLines("../outside"));
         assertThrows(IOException.class, () -> storage.list("../outside", ".json"));
         assertThrows(IOException.class, () -> storage.delete("../outside"));
         assertThrows(IOException.class, () -> storage.appendLine("../outside", "line"));
@@ -130,6 +200,7 @@ class WorldDataStorageTest {
 
         assertThrows(IOException.class, () -> storage.exists(absolute));
         assertThrows(IOException.class, () -> storage.read(absolute, input -> input.readAllBytes()));
+        assertThrows(IOException.class, () -> storage.readLines(absolute));
         assertThrows(IOException.class, () -> storage.list(absolute, ".json"));
         assertThrows(IOException.class, () -> storage.delete(absolute));
         assertThrows(IOException.class, () -> storage.appendLine(absolute, "line"));

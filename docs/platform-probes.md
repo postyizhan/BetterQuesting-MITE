@@ -41,6 +41,16 @@ fastutil 与 Trove 均不在游戏、launcher libraries、FishModLoader、Rusted
 
 因此领域层只能使用 JDK 集合。新增任何依赖前，必须先核实对应类在实际运行时 classpath 上真实存在，不能把编译期成功视为运行时可用。
 
+## 追加写与审计日志语义
+
+本批次在 Windows/Java 17 上验证了 NIO 追加写边界：`FileChannel.open(path, APPEND, READ)` 会抛出 `IllegalArgumentException`，两种选项不能组合，因此末字节检查必须先使用独立 READ channel，再打开 APPEND channel。APPEND channel 本身支持 `position()` 与 `truncate(long)`；实测 4 字节文件可成功截断到 2 字节且内容正确，这使追加失败后按打开时长度回滚成为可行策略。
+
+当已有非空文件的末字节不是 LF 时，移植端会在下一条记录前先追加 LF。该守卫只保证**分帧隔离**：崩溃残片不会与下一条记录融合；它不能判断已经独占一行的残片（测试中的 `incomplete`）是否为垃圾。`readLines` 只返回以 LF 结尾的原始行，记录识别必须由具备自校验能力的审计格式及其解析器负责。
+
+Java 没有跨平台父目录 fsync，Windows 尤其无法通过标准 API 完成该操作。因此 `appendLine` 新建文件后虽已同步文件内容与元数据，目录项在断电后的持久性仍取决于底层文件系统；原子替换的 `Files.move` 也有同类限制，断电后可能回到旧文件内容而非产生已同步文件内部的数据损坏。
+
+上游 `JsonHelper.ReadFromFile` 对文件名使用 `contains(".DS_Store")` 与 `contains("malformed_")`，而且过滤发生在读取阶段，不是前缀匹配。移植端没有对应的读取跳过层，因此有意把这两项 contains 过滤合并到 `list` 枚举边界，避免迁移世界中的 malformed 文件被当作正常进度输入。
+
 ## Access Widener 状态
 
 `src/main/resources/betterquesting.accesswidener` 已落地：

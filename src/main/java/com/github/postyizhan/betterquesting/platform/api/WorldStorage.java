@@ -16,7 +16,8 @@ public interface WorldStorage {
 
     /**
      * Returns the BetterQuesting data directory when available. The directory may not exist until
-     * the first successful {@link #writeAtomically(String, OutputWriter)} call.
+     * the first successful {@link #writeAtomically(String, OutputWriter)} or
+     * {@link #appendLine(String, String)} call.
      */
     Optional<Path> getDataDirectory();
 
@@ -30,14 +31,34 @@ public interface WorldStorage {
      */
     <T> Optional<T> read(String relativePath, InputReader<T> reader) throws IOException;
 
+    /**
+     * Returns every UTF-8 line ending in LF, without the LF. A final fragment without LF is
+     * silently discarded; callers remain responsible for validating each returned record's format.
+     */
+    List<String> readLines(String relativePath) throws IOException;
+
+    /**
+     * Lists matching regular files. The implementation deliberately merges upstream's enumeration
+     * suffix filter with its read-time contains checks for {@code .DS_Store} and
+     * {@code malformed_}, because this boundary has no corresponding read-side skip. A failed
+     * regular-file stat is omitted silently, unlike upstream's later logged read failure.
+     */
     List<String> list(String relativeDirectory, String suffix) throws IOException;
 
     boolean delete(String relativePath) throws IOException;
 
     /**
-     * Appends one line followed by LF and synchronizes it before returning. A process crash between
-     * the single write and synchronization can leave an incomplete final line; readers of these
-     * append logs must discard that trailing fragment without rejecting earlier complete lines.
+     * Appends one UTF-8 line followed by LF and synchronizes file content and metadata before
+     * returning. For a newly created file, its directory entry is not fsynced because Java has no
+     * cross-platform parent-directory fsync; following power loss the file may be absent even
+     * though this method returned successfully.
+     *
+     * <p>When a non-empty target lacks a final LF, the implementation first appends LF. This only
+     * isolates framing so a crash fragment cannot fuse with the next record; it cannot recognize
+     * that the isolated fragment is invalid. {@link #readLines(String)} returns raw framed lines,
+     * and the audit record format/parser must be self-validating. Calls must obey the platform
+     * implementation's same-path serialization constraint so the last-byte guard and rollback do
+     * not race with another append.
      */
     void appendLine(String relativePath, String line) throws IOException;
 

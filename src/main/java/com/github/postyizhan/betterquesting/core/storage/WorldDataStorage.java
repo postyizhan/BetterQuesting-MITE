@@ -10,6 +10,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.NotDirectoryException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -18,6 +19,12 @@ import java.util.stream.Stream;
 /**
  * Rooted filesystem operations for one world's BetterQuesting data directory. Keeping path
  * resolution at this boundary ensures every operation receives the same traversal checks.
+ *
+ * <p>All methods must run on the server main thread, or the caller must otherwise prevent
+ * concurrent access to the same relative path. {@link AtomicFileStorage#write} uses one fixed
+ * {@code <target>.tmp} sibling, while {@link #appendLine} relies on a last-byte guard and truncation
+ * rollback; concurrent operations on one target would invalidate both protocols. Upstream
+ * serialized file IO through its single-threaded BQThreadedIO queue, which this port does not keep.
  */
 public final class WorldDataStorage {
     private final Path root;
@@ -40,60 +47,150 @@ public final class WorldDataStorage {
         Objects.requireNonNull(reader, "reader");
         Path path = resolve(relativePath);
         try (InputStream input = Files.newInputStream(path)) {
-            return Optional.of(Objects.requireNonNull(reader.read(input), "reader result"));
-        } catch (NoSuchFileException | NotDirectoryException missing) {
+            T result = reader.read(input);
+            if (result == null) {
+                throw new IOException("Reader returned null for " + relativePath);
+            }
+            return Optional.of(result);
+        } catch (NoSuchFileException missing) {
+            throwIfStorageLayoutIsNotDirectory(path);
             return Optional.empty();
         }
     }
 
+    /**
+     * Returns all UTF-8 lines terminated by LF, without their terminators. A final byte fragment
+     * without LF is silently discarded; parsing and authenticating each returned audit record is
+     * the responsibility of the format-specific caller.
+     */
+    public List<String> readLines(String relativePath) throws IOException {
+        Path path = resolve(relativePath);
+        byte[] bytes;
+        try {
+            bytes = Files.readAllBytes(path);
+        } catch (NoSuchFileException missing) {
+            throwIfStorageLayoutIsNotDirectory(path);
+            return List.of();
+        }
+
+        int completeLength = bytes.length;
+        while (completeLength > 0 && bytes[completeLength - 1] != '\n') {
+            completeLength--;
+        }
+        if (completeLength == 0) {
+            return List.of();
+        }
+
+        String complete = new String(bytes, 0, completeLength, StandardCharsets.UTF_8);
+        String[] framed = complete.split("\\n", -1);
+        List<String> lines = new ArrayList<>(framed.length - 1);
+        for (int index = 0; index < framed.length - 1; index++) {
+            lines.add(framed[index]);
+        }
+        return List.copyOf(lines);
+    }
+
+    /**
+     * Lists regular files with the requested suffix, excluding names containing {@code .DS_Store}
+     * or {@code malformed_}. Upstream applied the suffix while enumerating and those two contains
+     * checks while reading; this port deliberately merges both stages here because it has no
+     * matching read-side skip. Name filters run before the regular-file stat. Unlike upstream,
+     * stat failures are treated as non-regular entries and therefore omitted without logging.
+     */
     public List<String> list(String relativeDirectory, String suffix) throws IOException {
         Objects.requireNonNull(suffix, "suffix");
         Path directory = resolve(relativeDirectory);
         try (Stream<Path> entries = Files.list(directory)) {
             return entries
+                .filter(path -> {
+                    String name = path.getFileName().toString();
+                    return name.endsWith(suffix)
+                        && !name.contains(".DS_Store")
+                        && !name.contains("malformed_");
+                })
                 .filter(Files::isRegularFile)
                 .map(path -> path.getFileName().toString())
-                .filter(name -> name.endsWith(suffix))
                 .sorted()
                 .toList();
-        } catch (NoSuchFileException | NotDirectoryException missing) {
-            // The directory may disappear between the type check and opening its stream.
+        } catch (NoSuchFileException missing) {
+            // The directory does not exist or disappeared before its stream was opened.
+            return List.of();
+        } catch (NotDirectoryException notDirectory) {
+            // A regular file occupies the requested directory path.
             return List.of();
         }
     }
 
     public boolean delete(String relativePath) throws IOException {
-        return Files.deleteIfExists(resolve(relativePath));
+        Path path = resolve(relativePath);
+        if (Files.exists(path) && !Files.isRegularFile(path)) {
+            throw new IOException("Delete target is not a regular file: " + relativePath);
+        }
+        return Files.deleteIfExists(path);
     }
 
     /**
-     * Appends one UTF-8 line with a fixed LF terminator and forces it to stable storage. The append
-     * is deliberately not implemented as atomic replacement: already-written audit bytes must
-     * survive a later crash. If the process dies between the single write and {@code force}, the
-     * file may end in an incomplete line; readers must discard that trailing fragment rather than
-     * treating the whole file as malformed.
+     * Appends one UTF-8 line with an LF terminator and synchronizes file content and metadata. For
+     * a newly created file, its directory entry is not fsynced because Java provides no
+     * cross-platform parent-directory fsync. Following power loss that file may therefore be
+     * absent even though this method returned successfully.
+     *
+     * <p>If an existing non-empty file does not end in LF, an extra LF is prepended to the new
+     * record. This guard provides framing isolation: a crash fragment cannot fuse with the next
+     * record. It cannot identify a fragment such as {@code sec} as invalid after that fragment has
+     * become its own line. {@link #readLines} returns raw framed lines, so the audit record format
+     * and its parser must be self-validating and reject lines that are not valid records.
+     *
+     * <p>The last-byte check uses a separate read channel because APPEND and READ cannot be opened
+     * together. The check-to-append race is safe only under this class's same-path serialization
+     * requirement. An IOException or RuntimeException while writing or forcing rolls the channel
+     * back to its size immediately after opening; a rollback failure is suppressed on the original
+     * exception.
      */
     public void appendLine(String relativePath, String line) throws IOException {
+        Path path = resolve(relativePath);
         Objects.requireNonNull(line, "line");
         if (line.indexOf('\n') >= 0 || line.indexOf('\r') >= 0) {
             throw new IllegalArgumentException("Audit line must not contain CR or LF");
         }
 
-        Path path = resolve(relativePath);
         Path parent = path.getParent();
         if (parent == null) {
             throw new IOException("Target has no parent directory: " + path);
         }
         Files.createDirectories(parent);
-        byte[] encoded = (line + "\n").getBytes(StandardCharsets.UTF_8);
+
+        boolean needsFramingLf = false;
+        if (Files.exists(path) && Files.size(path) > 0) {
+            try (FileChannel reader = FileChannel.open(path, StandardOpenOption.READ)) {
+                ByteBuffer lastByte = ByteBuffer.allocate(1);
+                reader.position(reader.size() - 1);
+                while (lastByte.hasRemaining()) {
+                    reader.read(lastByte);
+                }
+                needsFramingLf = lastByte.array()[0] != '\n';
+            }
+        }
+
+        byte[] encoded = ((needsFramingLf ? "\n" : "") + line + "\n")
+            .getBytes(StandardCharsets.UTF_8);
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE,
             StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
-            int written = channel.write(ByteBuffer.wrap(encoded));
-            if (written != encoded.length) {
-                throw new IOException("Incomplete append to " + path + ": wrote " + written
-                    + " of " + encoded.length + " bytes");
+            long before = channel.size();
+            try {
+                ByteBuffer buffer = ByteBuffer.wrap(encoded);
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer);
+                }
+                channel.force(true);
+            } catch (IOException | RuntimeException failure) {
+                try {
+                    channel.truncate(before);
+                } catch (IOException | RuntimeException rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+                throw failure;
             }
-            channel.force(true);
         }
     }
 
@@ -103,6 +200,19 @@ public final class WorldDataStorage {
 
     public Optional<Path> backup(String relativePath) throws IOException {
         return atomicFiles.backup(resolve(relativePath));
+    }
+
+    private void throwIfStorageLayoutIsNotDirectory(Path path) throws IOException {
+        Path parent = path.getParent();
+        while (parent != null && parent.startsWith(root)) {
+            if (Files.exists(parent) && !Files.isDirectory(parent)) {
+                throw new IOException("Storage path parent is not a directory: " + parent);
+            }
+            if (parent.equals(root)) {
+                break;
+            }
+            parent = parent.getParent();
+        }
     }
 
     private Path resolve(String relativePath) throws IOException {

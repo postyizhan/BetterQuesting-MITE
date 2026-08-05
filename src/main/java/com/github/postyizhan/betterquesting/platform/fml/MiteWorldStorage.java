@@ -19,6 +19,12 @@ import net.minecraft.server.MinecraftServer;
  * unload; caching one in a static field would retain the previous integrated-server save path.
  * Resolving before {@code worldServers} is assigned permanently produces a disabled instance, so
  * lifecycle wiring must resolve later than world loading.
+ *
+ * <p>Every method must be invoked on the server main thread, or callers must guarantee that the
+ * same relative path is never accessed concurrently. Atomic writes share a fixed
+ * {@code <target>.tmp} sibling, and append writes rely on a last-byte guard plus truncate rollback.
+ * Upstream serialized these operations through BQThreadedIO; this port intentionally has no such
+ * queue, so violating this constraint can corrupt either protocol.
  */
 public final class MiteWorldStorage implements WorldStorage {
     private static final String DATA_DIRECTORY_NAME = "betterquesting";
@@ -92,6 +98,11 @@ public final class MiteWorldStorage implements WorldStorage {
     @Override
     public <T> Optional<T> read(String relativePath, InputReader<T> reader) throws IOException {
         return storage().read(relativePath, reader::read);
+    }
+
+    @Override
+    public List<String> readLines(String relativePath) throws IOException {
+        return storage().readLines(relativePath);
     }
 
     @Override

@@ -35,6 +35,9 @@ public final class AtomicFileStorage {
      * Writes synchronously through a fixed sibling {@code .tmp} file and replaces the target.
      * Matching upstream's normal save path, this method does not create a backup; callers must
      * invoke {@link #backup(Path)} explicitly for version upgrades or malformed input recovery.
+     * After replacement, the parent directory is not fsynced because Java has no cross-platform
+     * directory fsync. Following power loss the rename may therefore revert to the old file
+     * contents; this is a weaker persistence guarantee, not corruption of the synchronized file.
      */
     public void write(Path target, OutputWriter writer) throws IOException {
         Objects.requireNonNull(target, "target");
