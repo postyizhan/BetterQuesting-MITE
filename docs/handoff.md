@@ -6,8 +6,8 @@
 
 ## 当前真实基线
 
-- HEAD 共 17 个提交，相对 `origin/main` ahead 16 个。
-- 工作树干净；最近提交信息为 `docs: 更新阶段三交接状态与后续顺序`。
+- HEAD 共 18 个提交，相对 `origin/main` ahead 17 个。
+- 工作树干净；最近提交信息为 `feat: 建立世界目录解析与原子写入存储层`。
 - 不要把具体易变化的 HEAD hash 写入交接文档，提交信息可以记录。
 
 ---
@@ -75,6 +75,14 @@
 
 如果你要统一用 tken，改 `~/.pi/agent/agents/bq.bq-port-reviewer.md` 的 `model` 字段即可，但要清楚代价是失去异源审核的价值。反过来，涉及高风险语义（存档格式、权限判定、并发）的批次，建议保持 Claude。
 
+### reviewer 主模型断连时的处置
+
+`WorldStorage` 批次连续两次派 reviewer 都在**运行到第 6 个 turn 时**报 `Connection error.`。查 `meta.json` 的 `attemptedModels` 只有 `geek2-claude/claude-opus-5` 一项——**回退链没有触发**。原因是 pi-subagents 的 fallback 只覆盖启动失败，中途断连不会切换模型。
+
+所以配置里写了 `fallbackModels` 不等于中途断连有保护。处置方式是在调用时用 `model` 参数显式覆盖主模型：本批次改用 `S3AI/claude-opus-5` 后一次成功，产出完整审核报告。
+
+`models.json` 里可用的 Claude 渠道（供覆盖时选择）：`S3AI`、`Gorouter`、`super`、`geek2-claude`、`geek2-claude-fest`、`agentrouterLinuxDo-claude`、`agentrouterGitHub-claude`。`baibei` 和 `anyrouter-claude` 见下方不可用清单。
+
 ### 并发约束
 
 **同一时刻只能有一个子代理写入 `src/`。** reviewer 必须是只读。多个写入者并发操作同一工作目录会互相覆盖。
@@ -91,7 +99,7 @@
 
 ## 3. 当前状态
 
-最近一次构建、测试与审核基线见 §4.1：`./gradlew clean build --console=plain` 通过，22 个测试类、156 个测试全绿；RFC 4122 UUIDv5 测试向量另经 Python `uuid.uuid5` 独立核对一致，S3AI Claude 复审结论为 `No blocking issues`。
+最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，23 个测试类、168 个测试全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2。
 
 ### 已完成
 
@@ -150,9 +158,18 @@
 - 派生 UUID 不是真实 Mojang UUID；玩家改名会形成新的逻辑身份，必须由管理员显式映射/合并。
 - 导入上游 1.7.10 存档时，档里的真实 UUID 与派生 UUID 之间没有可计算映射，故默认隔离。
 
-### 4.2 `WorldStorage`
+### 4.2 `WorldStorage`（已完成）
 
-主代理独立 `javap` 复核得到的字节码事实：
+提交 `feat: 建立世界目录解析与原子写入存储层`。落地文件：
+
+- `platform/api/WorldStorage.java` — 纯写侧边界接口
+- `platform/fml/MiteWorldStorage.java` — 世界目录解析与禁用分支
+- `core/storage/AtomicFileStorage.java` — tmp → sync → replace 事务
+- `core/storage/StoragePaths.java` — 纯 JVM 路径边界守卫
+- `src/test/.../core/storage/AtomicFileStorageTest.java` — 12 个测试
+- `src/main/resources/betterquesting.accesswidener` — 新增 1 条规则
+
+主代理独立 `javap` 复核得到的字节码事实（全部证实）：
 
 - Forge 的 `DimensionManager` 在 MITE 不可用。
 - `MinecraftServer.worldServers` 是 public 数组。
@@ -160,17 +177,41 @@
 - `ISaveHandler` 不声明 `getWorldDirectory()`；它声明的是 public `getWorldDirectoryName()` 和 `flush()`。
 - 具体类 `SaveHandler` 有 protected `File getWorldDirectory()`。
 - 不要用 `MinecraftServer.getFile()` 拼 `saves/<name>`——专服与集成服务器下语义不同。
+- `SaveFormatOld.getSaveLoader` 返回 `SaveHandler`，`AnvilSaveConverter.getSaveLoader` 返回继承自它的 `AnvilSaveHandler`。所以 `instanceof SaveHandler` 在专服与集成服正常路径都成立，禁用分支是真防御分支。`SaveHandlerMP` 不继承 `SaveHandler`。
 
-结论路径：先取 `worldServers[0].getSaveHandler()`，运行时验证并 cast 为 `SaveHandler`，再通过 access widener 开放 protected `SaveHandler.getWorldDirectory()`，或使用 invoker/accessor mixin。落 access widener 规则前，必须从当前 mapped JAR 核对 owner、方法名和真实 descriptor，不得跨版本猜测。运行时若 `ISaveHandler` 实际实现不是 `SaveHandler`，必须显式禁用存档并报告；不得触发 `ClassCastException`，也不得猜测目录路径。不得写成 `ISaveHandler.getWorldDirectory()`。
+最终实现路径：`worldServers[0].getSaveHandler()` → `instanceof SaveHandler` 检查 → cast → access widener 开放的 `getWorldDirectory()`。规则原文，descriptor 已从当前 mapped JAR 核对：
+
+```text
+accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
+```
+
+运行时接线由 `fml.mod.json` 的 `"accessWidener"` 键提供。**该规则已用反转法验证**：移除后编译恰好在两处 `getWorldDirectory()` 调用点报 protected 访问错误。
+
+#### 本批次交叉审核修正的两个 High
+
+审核由 `S3AI/claude-opus-5` 完成（`geek2-claude` 连续两次中途断连，回退链不覆盖运行中断连）。两条都已修并被测试锁住：
+
+**H1 隐式备份**：初版 `write()` 每次都无条件生成带毫秒时间戳的 `.bak`，永不覆盖也不清理。已核对上游：`JsonHelper.WriteToFile2` 正常保存路径**完全没有备份**，只有 tmp → readback 校验 → move；备份只出现在解析失败（固定名 `malformed_<name>.json`）与版本升级两处。按 dirty-player 模型，每玩家每 autosave 周期新增一个完整副本会直接耗尽磁盘。现在 `write()` 不备份，`backup()` 是显式独立 API。反转验证：加回隐式备份恰好 1 个测试失败。
+
+**H2 `flush()` 转发 vanilla**：初版转发 `ISaveHandler.flush()`。字节码证实 `AnvilSaveHandler.flush()` = `ThreadedFileIOBase.waitForFinish()` + `RegionFileCache.clearRegionFileReferences()`，即 BQ 一次 flush 会阻塞 vanilla 区块 IO 线程并关闭全部 region 文件句柄——BQ 无权代 vanilla 做这个决定。`SaveHandler.flush()` 本身是空方法体（`0: return`）。现在 `flush()` 只保证 BQ 自身语义，`saveHandler` 字段已删除（顺带解除对 `MinecraftServer` 对象图的强引用）。
+
+#### 已知未做，接线时必须处理
+
+- **无 readback 校验**。上游 move 前会把 tmp 重新 `GSON.fromJson` 解析一遍，失败则放弃替换。当前只有 TODO 注释，钩子位置留给 serializer 批次决定。
+- **`WorldStorage` 是纯写侧**。上游加载路径需要 read/exists/list/delete（`SaveLoadHandler` 要读 6 个文件并列 `QuestProgress/` 目录）。补读侧时会改接口，越晚接线越贵。
+- **`MiteWorldStorage` 是世界生命周期绑定对象**，不能静态缓存。集成服务器每次进入世界都新建 server 与 save handler，缓存会让第二个世界继续写第一个世界的目录。且 `worldServers` 只在 `loadAllWorlds` 中赋值，在 world load 前调用 `resolve()` 会**永久固化为禁用**，无重试路径。
+- **路径守卫只做词法 `normalize()`**，不解析符号链接。`betterquesting/` 下的符号链接可绕出目录。一旦 `relativePath` 来自客户端数据包，必须改成白名单或 `toRealPath()`。
+- **`MiteWorldStorage` 无测试**，依赖 `MinecraftServer`。守卫逻辑已抽到 `StoragePaths` 纯函数并有覆盖，但禁用分支与目录解析仍只有人眼核对。
+- **POSIX 权限未实测**。已改回上游的 `FileOutputStream` 建 tmp（走 umask）而非 `Files.createTempFile`（owner-only 0600），但结论来自 javadoc 推断，需 Linux smoke test。
 
 ### 4.3 存档/迁移剩余
 
-按当前优先级实施，以下项目均未完成，不得在后续报告中声称已落地：
+第 1、4 项已完成（见 §4.2）。以下项目均未完成，不得在后续报告中声称已落地：
 
-1. 完成 `WorldStorage` 世界目录解析及所需 access widener 或 invoker/accessor。
+1. ~~完成 `WorldStorage` 世界目录解析及所需 access widener 或 invoker/accessor。~~ 已完成。
 2. 持久化身份映射并建立追加审计；迁移报告必须记录身份来源和管理员决定，这是 plan.md 阶段 3 第 7 条的硬要求。
 3. 保留原 `format`、`build`、任务 ID、属性 key 和 UUID 表示，另增 `mitePortFormat` 表示移植端 schema。
-4. 实现原子文件写入与带时间戳备份：临时文件 → 关闭/同步 → 替换；Windows 上 `ATOMIC_MOVE` 跨卷不可用时必须有回退路径。
+4. ~~实现原子文件写入与带时间戳备份。~~ 已完成，但备份改为显式调用而非每次写入隐式生成（对齐上游，见 §4.2 H1）。
 5. 建立 JSON/NBT golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度、损坏/截断/超大文件。
 6. 实现 `LegacyQuestImporter`；旧 `QuestProgress.json` 转换为逐玩家文件后必须保留原件。
 7. 周期 autosave、world save、server stop 均触发 flush；server stop 必须等待待处理 I/O 完成。
@@ -183,19 +224,21 @@
 
 1. 先核对 `git status`、`git log` 和当前测试数。
 2. 再读取 `plan.md` 阶段 3 与 `docs/platform-probes.md`。
-3. 按上述优先级派 writer 实现一个批次。
-4. 派 S3AI Claude reviewer 复审该批次。
-5. 主代理核实相关 `javap` owner/字段/descriptor 与测试结果，再提交。
+3. 按 §4.3 优先级派 writer 实现下一个批次，即第 2 项**持久化身份映射与追加审计**。这一项会第一次真正接线 `WorldStorage`，所以必须同时处理 §4.2 列出的生命周期约束（不得静态缓存、不得在 world load 前 `resolve()`）和读侧接口缺口。
+4. 派 reviewer 复审该批次。**reviewer 主模型直接指定 `S3AI/claude-opus-5`**，不要用配置文件里的 `geek2-claude/claude-opus-5`（本会话连续两次中途断连）。
+5. 主代理核实相关 `javap` owner/字段/descriptor 与测试结果，用反转法验证关键修复，再提交。
 
 ### 4.5 已知残余风险
 
-身份映射尚未持久化；尚无追加审计；adapter 尚未用真实 `EntityPlayer` 做测试；container GUI blocker 仍存在。
+身份映射尚未持久化；尚无追加审计；`MitePlayerIdentityAdapter` 尚未用真实 `EntityPlayer` 做测试；container GUI blocker 仍存在。
+
+`WorldStorage` 新增的残余风险见 §4.2「已知未做」：无 readback 校验、纯写侧接口、生命周期绑定未接线、符号链接可绕过词法守卫、`MiteWorldStorage` 无测试、POSIX 权限未实测。
 
 ---
 
 ## 5. 平台关键事实
 
-完整证据链仅对 §5.1 成立，证据在 `docs/platform-probes.md`。§5.2/§5.3 的结论由当前代码注释、测试及本项目字节码核实记录锁定，但尚未整理进 `docs/platform-probes.md`。这里是最容易踩的三条。
+完整证据链对 §5.1 与 §5.4 成立，证据在 `docs/platform-probes.md`。§5.2/§5.3 的结论由当前代码注释、测试及本项目字节码核实记录锁定，但尚未整理进 `docs/platform-probes.md`。这里是最容易踩的四条。
 
 ### 5.1 `ResourceLocation` 不能当逻辑 ID（blocker）
 
@@ -234,6 +277,14 @@ MITE 的 `ResourceLocation` 构造器会把实例登记进静态待校验队列�
 
 第一版实现统一经 `Double` 中转，同时搞错了负小数取整方向和大 long 精度。现在 `api/properties/basic/NbtNumbers` 按源 tag id 分支复刻。**新增数值属性类型时必须按类型分别处理，不能套用统一规则。** 特别注意 `NBTTagFloat` 的 long 访问器用直接强转，而 `NBTTagDouble` 用 floor——两者不同。
 
+### 5.4 `ChatAllowedCharacters` 字段名陷阱
+
+后续做文件名安全化时必读，已写入 `docs/platform-probes.md`。
+
+MITE 的 `ChatAllowedCharacters.allowedCharacters` 是 **`String`**，内容来自客户端资源 `/font.txt`。字符数组字段叫 `allowedCharactersArray`，而它的内容其实是 **15 个禁用字符**（字段名有误导性）：`/`、`\n`、`\r`、`\t`、`\0`、`\f`、`` ` ``、`?`、`*`、`\`、`<`、`>`、`|`、`"`、`:`。
+
+上游 `JsonHelper.makeFileNameSafe` 遍历的是 1.7.10 中 `char[]` 类型的 `allowedCharacters`，对应 MITE 的 `allowedCharactersArray`，**不是**同名 String 字段。照搬会同时犯两个错：把客户端 `/font.txt` 资源依赖引进服务端，以及用完全错误的过滤集。该禁用集也不含 Windows 保留设备名，`StoragePaths` 另行拒绝了 `CON`/`NUL`/`AUX`/`PRN`/`COM1-9`/`LPT1-9`。
+
 ---
 
 ## 6. 有意偏离上游的地方
@@ -248,6 +299,9 @@ MITE 的 `ResourceLocation` 构造器会把实例登记进静态待校验队列�
 | `questing/QuestInstance.java` | `readFromNBT` 开头 `prereqTypes.clear()` | 上游不清，重复读入同一实例会留下陈旧类型，把存档语义为 NORMAL 的前置报告成 HIDDEN/IMPLICIT，并写回存档。 |
 | `questing/party/PartyInstance.java` | `setStatus`/`hostMigrate` 用 `equals` 比 UUID；改角色映射时显式快照迭代 | 上游用 `!=` 引用比较，只在 UUID 都来自同一 map key 时才碰巧有效；一旦传入从 NBT 或网络包解析出的等值不同实例就误判。 |
 | `api/questing/IQuest.java` | `RequirementType` 去掉 `PresetIcon`，`getTranslationKey()` 返回原始 key | 图标属客户端阶段 5。ordinal 与 byte id 保持不变以维持存档格式。上游 lang key 的拼写错误 `visbility` 也保留。 |
+| `core/storage/AtomicFileStorage.java` | 写入**同步**完成，`writeAndSync` 额外做 `getFD().sync()` | 上游走 `BQThreadedIO.DISK_IO`（4 线程池）异步写且不 fsync。移植端先同步以保证 server stop 不丢数据。若后续为主线程性能引入异步队列，`WorldStorage.flush()` 必须 join 该队列，否则 stop 会静默丢数据。 |
+| `core/storage/AtomicFileStorage.java` | 备份仅在显式调用 `backup()` 时产生，名为带 UTC 时间戳的 `<file>.<ts>.bak` | 上游正常保存路径（`JsonHelper.WriteToFile2`）完全不备份，只在解析失败时写固定名 `malformed_<name>.json`、版本升级时写 `backup/<ver>/`。移植端保持正常写入不备份，以免每玩家每 autosave 周期堆积无上限副本；但备份名改为时间戳，避免覆盖历史证据。 |
+| `core/storage/StoragePaths.java` | 非法路径抛 `IOException` 拒绝，不做字符替换 | 上游 `JsonHelper.makeFileNameSafe` 把非法字符替换成 `_`，静默改名。存储边界宁可拒绝也不静默改写玩家进度文件名。另额外拒绝 Windows 保留设备名，上游禁用集不含这些，见 §5.4。 |
 
 ### 关于 `UuidDatabase` 的 `Map` 契约不对称
 
