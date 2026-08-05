@@ -36,9 +36,15 @@ run/
 
 .pi-subagents/
 
+# 仅本地参考的上游源码，不进版本库
+retroEMI-MITE-master/
+
 # java
 
 hs_err_*.log
 replay_*.log
 *.hprof
 *.jfr
+
+# runServer/runClient 产生的运行日志
+logs/

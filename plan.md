@@ -87,7 +87,8 @@ ManyLib 的部分鼠标、world-last、tooltip-last 分发目前未接通，并�
 
 - Forge Fluid 任务和流体提交；
 - OreDictionary 语义；
-- NEI、Vending Machine、DuraDisplay、GTNHLib 集成；
+- **EMI 集成（高优先级）**：替代原 NEI 集成，使用 retroEMI-MITE-master
+- Vending Machine、DuraDisplay、GTNHLib 集成；
 - HQM 导入；
 - CB4BQ 命令方块扩展；
 - 不存在于 MITE 的实体、维度、物品或流体兼容。
@@ -454,7 +455,13 @@ com.github.postyizhan.betterquesting
 
 - QuestBook 轻量物品入口；
 - HQM importer；
-- NEI；
+- **EMI 集成（高优先级）**：
+  - 移除原 `bq_standard/integration/nei`（4 个文件）
+  - 新增 `bq_standard/integration/emi` 模块
+  - 依赖 `retroEMI-MITE-master` (EMI 1.1.20+1.6.4-MITE)
+  - 实现 EmiPlugin 接口
+  - 注册任务作为可查看的"配方"类型
+  - 实现物品 → 任务的反向索引
 - Vending Machine；
 - DuraDisplay/GTNHLib 替代；
 - CB4BQ。
