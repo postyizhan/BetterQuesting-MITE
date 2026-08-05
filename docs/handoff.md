@@ -6,8 +6,8 @@
 
 ## 当前真实基线
 
-- HEAD 共 21 个提交，相对 `origin/main` ahead 20 个。
-- 工作树干净；最近提交信息为 `docs: 修正 Gson 2.2.2 可用 API 边界并对齐 lookup 缓存初始容量`。
+- HEAD 共 24 个提交，相对 `origin/main` ahead 23 个。
+- 工作树干净；最近提交信息为 `fix: 追加写分帧隔离崩溃残片并补齐审计日志读侧`。
 - 不要把具体易变化的 HEAD hash 写入交接文档，提交信息可以记录。
 
 ---
@@ -48,8 +48,19 @@
 - `removeQuest` null 守卫 → 反转后 1 个测试失败
 - `PartyInstance` UUID 值相等 → 反转后 2 个测试失败
 - `hostMigrate` 已有 OWNER 早退 → 删掉后 1 个测试失败
+- access widener 的 `getWorldDirectory` 规则 → 移除后编译恰好在两处调用点报 protected 错误
+- `appendLine` 的 LF 分帧守卫 → 移除后恰好 2 个分帧测试失败
+- `list` 的 `malformed_`/`.DS_Store` 排除、`read` 的父目录检查、reader 返回 null 抛 `IOException`、`delete` 拒绝目录 → 四项一次性反转，恰好 4 个对应测试失败，1:1 归因
 
-反转时注意：**不要用 `sed` 改多行 Java 代码**，本会话用 `sed` 反转 `QuestInstance` 时损坏了方法体（丢了一行、注释错位）。用 `edit` 工具做精确替换。
+反转时注意：**不要用 `sed` 改多行 Java 代码**，本会话用 `sed` 反转 `QuestInstance` 时损坏了方法体（丢了一行、注释错位）。用 `edit` 工具做精确替换。反转后**必须先核实文件真实内容再恢复**：本会话有一次假设的恢复文本与实际不符，`edit` 直接报错；若当时用的是模糊匹配，就会把反转状态留在树里。
+
+### 反转法证明不了的事
+
+反转只证明"测试锁住了这个行为"，**不证明"这个行为是对的"**。这两件事本会话真的分开过。
+
+`appendLine` 初版有个测试 `appendPreservesEveryExistingByteIncludingIncompleteTail`，断言崩溃残片 `incomplete` 后追加 `next` 得到 `incompletenext`。反转 APPEND 语义时它确实失败，看起来"锁住了行为"——但它锁住的行为本身是缺陷：`incompletenext` 是一条语法完整、无任何残缺标记的行，读侧无法把它和真实审计记录区分，等于允许伪造审计条目。
+
+发现者是异源 reviewer，不是反转法。**两者不能互相替代**：反转法防"假测试"，交叉审核防"测试把缺陷固化成规范"。
 
 ---
 
@@ -99,7 +110,7 @@
 
 ## 3. 当前状态
 
-最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，23 个测试类、169 个测试全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2，依赖运行时可用性见 §5.5。
+最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，24 个测试类、188 个测试全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
 
 ### 已完成
 
@@ -204,9 +215,46 @@ accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
 - **`MiteWorldStorage` 无测试**，依赖 `MinecraftServer`。守卫逻辑已抽到 `StoragePaths` 纯函数并有覆盖，但禁用分支与目录解析仍只有人眼核对。
 - **POSIX 权限未实测**。已改回上游的 `FileOutputStream` 建 tmp（走 umask）而非 `Files.createTempFile`（owner-only 0600），但结论来自 javadoc 推断，需 Linux smoke test。
 
+### 4.2b `WorldStorage` 读侧与追加写（已完成）
+
+提交 `feat: 补齐世界存储读侧枚举与追加写能力` 与 `fix: 追加写分帧隔离崩溃残片并补齐审计日志读侧`。这是为下一批次的追加审计做的前置。`core/storage/WorldDataStorage.java` 是纯 JVM 实现，`MiteWorldStorage` 只做委派。
+
+新增接口：`exists`、`read`、`readLines`、`list`、`delete`、`appendLine`。七个入口全部经 `StoragePaths.resolveWithin`，逃逸与绝对路径各有一个覆盖全部入口的测试。
+
+#### 交叉审核修掉的 Blocker：追加写会产生伪造审计记录
+
+初版 `appendLine` 只做纯追加。崩溃残片 `incomplete` 后追加 `next` 得到 `incompletenext`——一条语法完整、读侧无法识别为残缺的行。对审计日志而言等于允许伪造条目。修法三件套，缺一不可：
+
+1. **LF 分帧守卫**：已有非空文件末字节不是 LF 时先补一个 LF，残片因此独占一行。
+2. **写循环**：`while (buffer.hasRemaining()) channel.write(buffer)`，不再假设单次 write 写完。
+3. **truncate 回滚**：记录打开时 `channel.size()`，写入或 force 失败时截回，回滚失败用 `addSuppressed` 附加而不掩盖原异常。
+
+**分帧守卫只保证隔离，不保证识别。** 残片独占一行后仍是一条"完整"的行，`readLines` 无法判断它是垃圾。所以下一批次的**审计记录格式必须自校验**，解析器必须拒绝不合法的行。这条已写进 `appendLine` 与 `WorldStorage` 的 javadoc，不要指望存储层替你识别。
+
+#### 由主代理实测锁定的 NIO 边界（Windows / Java 17）
+
+- `FileChannel.open(path, APPEND, READ)` 抛 `IllegalArgumentException`，两选项不能组合。所以末字节检查必须先开独立 READ channel 再开 APPEND channel。这中间有 check-to-append 竞态，只在同路径串行化前提下安全。
+- APPEND channel 上 `position()` 与 `truncate(long)` 均可用（实测 4 字节截到 2 字节内容正确），所以回滚方案可行。
+- `Files.newInputStream(目录)` 抛 `AccessDeniedException`（**不是** `NotDirectoryException`）；`Files.newInputStream(普通文件/子路径)` 抛 `NoSuchFileException`；`Files.list(普通文件)` 抛 `NotDirectoryException`；`deleteIfExists(空目录)` 返回 true 并真的删掉。
+
+第 3 条导致两个真实缺陷已修：`read` 里的 `NotDirectoryException` catch 是死代码，而"路径中间段是普通文件"会被静默转成 `Optional.empty()`，把"存储布局损坏"报告成"数据不存在"；`delete` 会静默删空目录。
+
+**Linux 上第 3 条的异常映射未实测。** `NoSuchFileException` 在 Linux 可能是 `FileSystemException: Not a directory`。部署到 Linux 前应复跑探针。
+
+#### 与上游的有意偏离
+
+上游 `JsonHelper.ReadFromFile` 用 `contains(".DS_Store")` 和 `contains("malformed_")` 在**读取阶段**跳过文件（注意是 contains，不是前缀匹配）。移植端没有对应的读侧跳过层，所以把这两个 contains 过滤合并进了 `list` 枚举边界。否则从 1.7.10 迁移来的世界里已有的 `malformed_<uuid>.json` 会被当成正常玩家进度去解析。
+
+#### 已知未做
+
+- **无父目录 fsync**。Java 无跨平台方案，Windows 尤其做不到。`appendLine` 新建文件后目录项持久性取决于文件系统；`AtomicFileStorage` 的 `Files.move` 同理。javadoc 已把承诺降级到与实际一致，不要再声称 forces to stable storage。
+- **无短写/force/truncate 故障注入测试**。`WorldDataStorage` 直接开真实 `FileChannel`，没有可注入的 seam。加抽象会扩大批次范围，故只做了真实文件系统端到端覆盖。
+- **同路径并发无内部锁**。两个类的 javadoc 都声明必须在服务端主线程调用或由调用方串行化。上游靠 `BQThreadedIO` 单线程队列做这件事，移植端取消了那层队列却没有替代物。若下一批次要从网络线程写审计，必须改成按路径加锁。
+- `list` 的 `Files.isRegularFile` 会把 stat 失败当作非普通文件静默省略，上游则会交给读取阶段并至少记日志。已在 javadoc 登记。
+
 ### 4.3 存档/迁移剩余
 
-第 1、4 项已完成（见 §4.2）。以下项目均未完成，不得在后续报告中声称已落地：
+第 1、4 项已完成（见 §4.2）；读侧与追加写前置已完成（见 §4.2b）。以下项目均未完成，不得在后续报告中声称已落地：
 
 1. ~~完成 `WorldStorage` 世界目录解析及所需 access widener 或 invoker/accessor。~~ 已完成。
 2. 持久化身份映射并建立追加审计；迁移报告必须记录身份来源和管理员决定，这是 plan.md 阶段 3 第 7 条的硬要求。
@@ -224,15 +272,15 @@ accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
 
 1. 先核对 `git status`、`git log` 和当前测试数。
 2. 再读取 `plan.md` 阶段 3 与 `docs/platform-probes.md`。
-3. 按 §4.3 优先级派 writer 实现下一个批次，即第 2 项**持久化身份映射与追加审计**。这一项会第一次真正接线 `WorldStorage`，所以必须同时处理 §4.2 列出的生命周期约束（不得静态缓存、不得在 world load 前 `resolve()`）和读侧接口缺口。
+3. 派 writer 实现 §4.3 第 2 项**持久化身份映射与追加审计**。读侧与 `appendLine` 已就绪（§4.2b），所以本批次可以直接用。两个硬约束：一是 **审计记录格式必须自校验**（分帧守卫不识别残片，见 §4.2b）；二是必须处理 §4.2 的生命周期约束（不得静态缓存 `MiteWorldStorage`、不得在 world load 前 `resolve()`）。还要注意运行时 Gson 只有 2.2.2（§5.5），写 JSON 前先读 `platform-probes.md` 的可用 API 清单。
 4. 派 reviewer 复审该批次。**reviewer 主模型直接指定 `S3AI/claude-opus-5`**，不要用配置文件里的 `geek2-claude/claude-opus-5`（本会话连续两次中途断连）。
 5. 主代理核实相关 `javap` owner/字段/descriptor 与测试结果，用反转法验证关键修复，再提交。
 
 ### 4.5 已知残余风险
 
-身份映射尚未持久化；尚无追加审计；`MitePlayerIdentityAdapter` 尚未用真实 `EntityPlayer` 做测试；container GUI blocker 仍存在。
+身份映射尚未持久化；尚无追加审计（存储能力已就绪，但无任何调用方）；`MitePlayerIdentityAdapter` 尚未用真实 `EntityPlayer` 做测试；container GUI blocker 仍存在。
 
-`WorldStorage` 新增的残余风险见 §4.2「已知未做」：无 readback 校验、纯写侧接口、生命周期绑定未接线、符号链接可绕过词法守卫、`MiteWorldStorage` 无测试、POSIX 权限未实测。
+`WorldStorage` 的残余风险分两处：§4.2「已知未做」（无 readback 校验、生命周期绑定未接线、符号链接可绕过词法守卫、`MiteWorldStorage` 无测试、POSIX 权限未实测）与 §4.2b「已知未做」（无父目录 fsync、无故障注入测试、同路径并发无内部锁、Linux 异常映射未实测）。§4.2 的「纯写侧接口」一条已由 §4.2b 解决。
 
 ---
 
