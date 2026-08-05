@@ -1,12 +1,14 @@
 package com.github.postyizhan.betterquesting.api.storage;
 
-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 class NaiveLookupLogic<T> extends LookupLogic<T> {
-    private Int2ObjectMap<DBEntry<T>> backingMap;
+    // fastutil and Trove are absent from the runtime classpath, and this build has no remapJar task
+    // through which Loom could package either library as jar-in-jar; keep this cache on JDK collections.
+    private Map<Integer, DBEntry<T>> backingMap;
 
     NaiveLookupLogic(SimpleDatabase<T> simpleDatabase) {
         super(simpleDatabase);
@@ -21,7 +23,7 @@ class NaiveLookupLogic<T> extends LookupLogic<T> {
     @Override
     public List<DBEntry<T>> bulkLookup(int[] keys) {
         if (backingMap == null) {
-            backingMap = new Int2ObjectOpenHashMap<>(simpleDatabase.mapDB.size());
+            backingMap = new HashMap<>(simpleDatabase.mapDB.size());
             for (DBEntry<T> entry : getRefCache()) {
                 backingMap.put(entry.getID(), entry);
             }

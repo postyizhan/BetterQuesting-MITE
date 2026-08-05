@@ -30,6 +30,25 @@ class LookupLogicTest {
     }
 
     @Test
+    void naiveLookupSkipsMissesPreservesOrderAndRebuildsAfterDataChange() {
+        TestDatabase<String> database = new TestDatabase<>();
+        database.add(1, "one");
+        database.add(100, "hundred");
+
+        assertEquals(LookupLogicType.Naive, LookupLogicType.determine(database));
+        assertEquals(
+            List.of("hundred", "one", "hundred"),
+            values(database.bulkLookup(100, 50, 1, 100))
+        );
+
+        database.add(200, "two hundred");
+        assertEquals(List.of("two hundred", "one"), values(database.bulkLookup(200, 1000, 1)));
+
+        database.removeID(100);
+        assertEquals(List.of("two hundred", "one"), values(database.bulkLookup(100, 200, 1)));
+    }
+
+    @Test
     void bigDatabasePreservesSparseQueryOrderAndDuplicates() {
         TestBigDatabase<String> database = new TestBigDatabase<>();
         database.add(1, "one");

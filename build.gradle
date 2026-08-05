@@ -37,8 +37,8 @@ dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
-    implementation("it.unimi.dsi:fastutil:8.5.12")
-    implementation("com.google.code.gson:gson:2.11.0")
+    // Minecraft 1.6.4 launcher libraries lock the runtime API surface to Gson 2.2.2; do not upgrade.
+    implementation("com.google.code.gson:gson:2.2.2")
 
     fml "com.github.MinecraftIsTooEasy:FishModLoader:3.4.2"
     implementation "com.github.MinecraftIsTooEasy:FishModLoader:3.4.2"

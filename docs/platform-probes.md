@@ -9,6 +9,27 @@
 - ManyLib 2.3.1 发布 JAR/源码 JAR：Gradle cache 中的 `ManyLib-2.3.1.jar` 与 `ManyLib-2.3.1-sources.jar`。
 - ManyLib Maven 坐标 `com.github.MinecraftIsTooEasy:ManyLib:2.3.1` 可由当前 `ModdedMITE` 仓库解析；发布元数据中的真实 mod id 是 `many-lib`。
 
+## 依赖运行时可用性
+
+### Gson 只能使用 2.2.2 API 面
+
+MC 1.6.4 的运行时 classpath 只有 Gson **2.2.2**。mapped 游戏 JAR 中 `com.google.gson.JsonObject.members` 的字段类型是 `com.google.gson.internal.StringMap`；`StringMap` 只存在于 Gson 2.1–2.2.x，而 Gson 2.3 起该字段改用的 `LinkedTreeMap` 在此游戏 JAR 中不存在。launcher libraries 也明确声明 `com.google.code.gson:gson:2.2.2`，两条证据相互吻合。因此 `build.gradle` 显式固定 2.2.2，让编译期 API 与运行期一致，不得升级。
+
+Gson 2.2.2 不提供以下 API：
+
+- `JsonObject.keySet()`、`JsonObject.size()`、`JsonObject.deepCopy()`；
+- `JsonArray.isEmpty()`；
+- `GsonBuilder.setLenient()`；
+- `ToNumberPolicy`、`FormattingStyle`。
+
+阶段 3 序列化批次读写上游 `QuestDatabase.json` 等文件时，只能使用 Gson 2.2.2 的 API 面；上游 1.7.10 代码中的新版 Gson 调用不能照搬。当前可用的基础接口包括 `JsonObject.entrySet()/has/get/add/remove/addProperty`、`JsonArray.size()/get/add/addAll`、`Gson.toJson/fromJson`、`GsonBuilder.serializeNulls/setPrettyPrinting/disableHtmlEscaping/create`，以及 `JsonWriter.setIndent/setLenient/beginObject/name/value`。
+
+### 领域层集合不得依赖 fastutil 或 Trove
+
+fastutil 与 Trove 均不在游戏、launcher libraries、FishModLoader、RustedIronCore 或 ManyLib 的运行时 classpath 中。本项目只有 `jar`、没有 `remapJar` 任务，因此 Loom 的 `include` 配置不能在当前构建中完成 jar-in-jar 打包；`com.github.MinecraftIsTooEasy:FastUtil:8.5.12` 坐标也只有空壳 POM，没有可供运行时加载的 JAR。
+
+因此领域层只能使用 JDK 集合。新增任何依赖前，必须先核实对应类在实际运行时 classpath 上真实存在，不能把编译期成功视为运行时可用。
+
 ## Access Widener 状态
 
 `src/main/resources/betterquesting.accesswidener` 已落地：
