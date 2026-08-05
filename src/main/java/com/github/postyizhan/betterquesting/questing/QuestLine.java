@@ -7,6 +7,7 @@ import com.github.postyizhan.betterquesting.api.properties.NativeProps;
 import com.github.postyizhan.betterquesting.api.questing.IQuestLine;
 import com.github.postyizhan.betterquesting.api.questing.IQuestLineEntry;
 import com.github.postyizhan.betterquesting.api.storage.UuidDatabase;
+import com.github.postyizhan.betterquesting.api.util.NbtCompat;
 import com.github.postyizhan.betterquesting.api.util.NbtUuid.UuidValueType;
 import com.github.postyizhan.betterquesting.api.util.UuidConverter;
 import com.github.postyizhan.betterquesting.storage.PropertyContainer;
@@ -139,7 +140,7 @@ public class QuestLine extends UuidDatabase<IQuestLineEntry> implements IQuestLi
                 UUID questId;
                 if (currentId.isPresent()) {
                     questId = currentId.get();
-                } else if (isNumeric(quest, "id")) {
+                } else if (NbtCompat.isNumeric(quest, "id")) {
                     questId = UuidConverter.convertLegacyId(quest.getInteger("id"));
                 } else {
                     continue;
@@ -150,13 +151,6 @@ public class QuestLine extends UuidDatabase<IQuestLineEntry> implements IQuestLi
         setupProps();
     }
 
-    private static boolean isNumeric(NBTTagCompound nbt, String key) {
-        if (!nbt.hasKey(key)) {
-            return false;
-        }
-        int id = nbt.getTag(key).getId();
-        return id >= 1 && id <= 6;
-    }
 
     @Override
     public <T> T getProperty(IPropertyType<T> prop) {

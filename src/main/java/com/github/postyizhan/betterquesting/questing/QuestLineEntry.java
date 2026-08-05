@@ -1,5 +1,6 @@
 package com.github.postyizhan.betterquesting.questing;
 
+import com.github.postyizhan.betterquesting.api.util.NbtCompat;
 import com.github.postyizhan.betterquesting.api.questing.IQuestLineEntry;
 import net.minecraft.NBTTagCompound;
 
@@ -85,7 +86,7 @@ public class QuestLineEntry implements IQuestLineEntry {
 
     @Override
     public void readFromNBT(NBTTagCompound nbt) {
-        if (isNumeric(nbt, "size")) {
+        if (NbtCompat.isNumeric(nbt, "size")) {
             sizeX = nbt.getInteger("size");
             sizeY = sizeX;
         } else {
@@ -96,13 +97,6 @@ public class QuestLineEntry implements IQuestLineEntry {
         posY = nbt.getInteger("y");
     }
 
-    private static boolean isNumeric(NBTTagCompound nbt, String key) {
-        if (!nbt.hasKey(key)) {
-            return false;
-        }
-        int id = nbt.getTag(key).getId();
-        return id >= 1 && id <= 6;
-    }
 
     @Override
     public String toString() {

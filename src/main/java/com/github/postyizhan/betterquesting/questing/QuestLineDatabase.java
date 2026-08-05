@@ -3,6 +3,7 @@ package com.github.postyizhan.betterquesting.questing;
 import com.github.postyizhan.betterquesting.api.questing.IQuestLine;
 import com.github.postyizhan.betterquesting.api.questing.IQuestLineDatabase;
 import com.github.postyizhan.betterquesting.api.storage.UuidDatabase;
+import com.github.postyizhan.betterquesting.api.util.NbtCompat;
 import com.github.postyizhan.betterquesting.api.util.NbtUuid.UuidValueType;
 import com.github.postyizhan.betterquesting.api.util.UuidConverter;
 import java.util.ArrayList;
@@ -122,10 +123,10 @@ public class QuestLineDatabase extends UuidDatabase<IQuestLine> implements IQues
             UUID lineId = null;
             if (currentId.isPresent()) {
                 lineId = currentId.get();
-            } else if (isNumeric(serializedLine, "lineID")) {
+            } else if (NbtCompat.isNumeric(serializedLine, "lineID")) {
                 lineId = UuidConverter.convertLegacyId(serializedLine.getInteger("lineID"));
             }
-            int order = isNumeric(serializedLine, "order") ? serializedLine.getInteger("order") : -1;
+            int order = NbtCompat.isNumeric(serializedLine, "order") ? serializedLine.getInteger("order") : -1;
 
             IQuestLine line = getOrDefault(lineId, new QuestLine());
             line.readFromNBT(serializedLine, merge);
@@ -147,11 +148,4 @@ public class QuestLineDatabase extends UuidDatabase<IQuestLine> implements IQues
         lineOrder.addAll(orderMap.values());
     }
 
-    private static boolean isNumeric(NBTTagCompound nbt, String key) {
-        if (!nbt.hasKey(key)) {
-            return false;
-        }
-        int id = nbt.getTag(key).getId();
-        return id >= 1 && id <= 6;
-    }
 }

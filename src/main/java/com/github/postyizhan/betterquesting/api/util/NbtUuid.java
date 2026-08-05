@@ -57,7 +57,7 @@ public final class NbtUuid {
         }
 
         public Optional<UUID> tryReadId(NBTTagCompound tag) {
-            if (isNumeric(tag, highIdFieldName) && isNumeric(tag, lowIdFieldName)) {
+            if (NbtCompat.isNumeric(tag, highIdFieldName) && NbtCompat.isNumeric(tag, lowIdFieldName)) {
                 return Optional.of(readId(tag));
             }
             return Optional.empty();
@@ -82,11 +82,7 @@ public final class NbtUuid {
         }
 
         public List<UUID> readIds(NBTTagCompound tag, String key) {
-            // MITE throws when getTagList sees a present non-list tag; upstream treats that case as empty.
-            if (!tag.hasKey(key) || tag.getTag(key).getId() != 9) {
-                return new ArrayList<>();
-            }
-            return readIds(tag.getTagList(key));
+            return readIds(NbtCompat.getListOrEmpty(tag, key));
         }
 
         public List<UUID> readIds(NBTTagList tagList) {
@@ -100,12 +96,5 @@ public final class NbtUuid {
             return result;
         }
 
-        private static boolean isNumeric(NBTTagCompound tag, String key) {
-            if (!tag.hasKey(key)) {
-                return false;
-            }
-            int id = tag.getTag(key).getId();
-            return id >= 1 && id <= 6;
-        }
     }
 }
