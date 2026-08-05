@@ -174,6 +174,61 @@ class PartyInstanceTest {
         assertEquals("New Party", party.getProperties().getProperty(NativeProps.NAME));
     }
 
+    @Test
+    void kickingOneOwnerLeavesRemainingOwnerAndDoesNotPromoteAdmin() {
+        // hostMigrate() scans for an existing OWNER first and returns immediately when one is found, so a
+        // second OWNER must suppress promotion entirely. Two OWNERs are only reachable via NBT, since
+        // setStatus demotes rivals.
+        UUID secondOwner = UUID.fromString("40000000-0000-0000-0000-000000000004");
+        NBTTagList members = new NBTTagList();
+        members.appendTag(memberTag(OWNER.toString(), "OWNER"));
+        members.appendTag(memberTag(secondOwner.toString(), "OWNER"));
+        members.appendTag(memberTag(ADMIN.toString(), "ADMIN"));
+        NBTTagCompound tag = new NBTTagCompound();
+        tag.setTag("members", members);
+
+        PartyInstance party = new PartyInstance();
+        party.readFromNBT(tag);
+        party.kickUser(OWNER);
+
+        assertEquals(EnumPartyStatus.OWNER, party.getStatus(secondOwner));
+        assertEquals(EnumPartyStatus.ADMIN, party.getStatus(ADMIN));
+    }
+
+    @Test
+    void kickingOwnerWithoutAdminPromotesExactlyOnePlainMember() {
+        UUID other = UUID.fromString("50000000-0000-0000-0000-000000000005");
+        PartyInstance party = new PartyInstance();
+        party.setStatus(OWNER, EnumPartyStatus.OWNER);
+        party.setStatus(MEMBER, EnumPartyStatus.MEMBER);
+        party.setStatus(other, EnumPartyStatus.MEMBER);
+
+        party.kickUser(OWNER);
+
+        // Upstream keeps the first member reached while iterating a HashMap, so which UUID wins is not a
+        // contract. Only the invariant is asserted: exactly one OWNER, and the rest stay MEMBER.
+        long owners = party.getMembers().stream().filter(m -> party.getStatus(m) == EnumPartyStatus.OWNER).count();
+        assertEquals(1, owners);
+        assertEquals(2, party.getMembers().size());
+    }
+
+    @Test
+    void nonCompoundMemberEntriesAreSkippedWithoutDroppingValidOnes() {
+        // MITE has no typed getCompoundTagAt, so the port guards element ids explicitly. Upstream never had
+        // to handle a non-compound entry here.
+        NBTTagList members = new NBTTagList();
+        members.appendTag(new NBTTagList());
+        members.appendTag(memberTag(ADMIN.toString(), "ADMIN"));
+        NBTTagCompound tag = new NBTTagCompound();
+        tag.setTag("members", members);
+
+        PartyInstance party = new PartyInstance();
+        party.readFromNBT(tag);
+
+        assertEquals(List.of(ADMIN), party.getMembers());
+        assertEquals(EnumPartyStatus.ADMIN, party.getStatus(ADMIN));
+    }
+
     private static PartyInstance partyWithRoles() {
         PartyInstance party = new PartyInstance();
         party.setStatus(OWNER, EnumPartyStatus.OWNER);
