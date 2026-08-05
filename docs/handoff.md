@@ -87,7 +87,9 @@
 
 ## 3. 当前状态
 
-14 个提交，工作树干净，`./gradlew clean build` 通过，127 个测试全绿（21 个测试类，77 个生产 Java 文件）。
+当前 HEAD 共 16 个提交（相对 `origin/main` 领先 15 个）；`PlayerIdentityService` 批次已提交，提交信息为 `feat: 建立玩家身份派生与旧档隔离映射`。本次文档改动之外没有其他实现批次需要从工作树接手。
+
+最近一次验证为 `./gradlew clean build --console=plain` 通过，22 个测试类、156 个测试全绿；RFC 4122 UUIDv5 测试向量另经 Python `uuid.uuid5` 独立核对一致。S3AI Claude 初审发现的问题已全部修正，复审结论为 `No blocking issues`。审核修正包括：限制 `mergeLegacy` 只能合并到已有 legacy 映射的目标、补齐解析结果四字段值语义、将平台规则外用户名改为可报告的 unresolved 结果、隔离 `EntityPlayer.getEntityName()` 返回 null 的平台边界并报告为 `<null>`、明确内存映射禁止提前驱动 identity-keyed 进度存档，以及补充玩家名大小写的平台字节码证据。保留决定包括：继续使用 `Locale.ROOT` 大小写折叠、用户名下界保持 1 字符、`PlayerIdentityService` 继续位于 `platform/api`。
 
 ### 已完成
 
@@ -115,23 +117,35 @@
 
 按 plan.md §13 首轮实施顺序的第 5 步走。
 
-### 4.1 `PlayerIdentityService`（最高优先级，也是最大风险）
+### 4.1 `PlayerIdentityService`（批次已提交，S3AI Claude 复审通过）
 
 **先读 plan.md §5 阶段 3 第 7 条的硬要求**：优先使用可验证的 MITE/GameProfile/服务端持久身份。若只能取得用户名或离线派生 UUID，**不得自动声称可识别改名玩家**；歧义数据应隔离并要求管理员通过映射表确认，迁移报告记录来源和决定。
 
-本会话已开始探查但未完成，已确认的事实：
+本会话已完成并提交首批实现，且已通过异源复审。新增文件可概括为：
+
+- `platform/api`：身份值对象、解析结果、来源枚举、服务接口及映射冲突异常。
+- `core/identity/DeterministicPlayerIdentityService`：确定性身份解析与管理员映射/合并逻辑。
+- `platform/fml/MitePlayerIdentityAdapter`：MITE 玩家对象适配。
+- `src/test/.../core/identity/DeterministicPlayerIdentityServiceTest`：规范化、UUIDv5、隔离、映射与冲突测试。
+
+已实现语义：
+
+- 先规范化用户名，再用固定 namespace 按 RFC 4122 UUIDv5 确定性派生逻辑身份；namespace 不随世界或运行实例变化。
+- 上游存档中的旧真实 UUID 默认保持隔离，绝不按用户名或派生 UUID 自动认领。
+- 只有管理员显式执行 `map`/`merge`，旧真实 UUID 数据才会关联或合并到当前逻辑身份；冲突会显式报错。
+- MITE adapter 只读取经 `javap` 验证的 `EntityPlayer.getEntityName()`，不虚构平台不存在的 GameProfile/UUID 能力。
+
+验证状态：`./gradlew clean build --console=plain` 通过；22 个测试类、156 个测试全绿，0 failure、0 error、0 skipped。
+
+**审核/提交状态**：S3AI Claude 初审发现的问题已修正，复审结论为 `No blocking issues`；`PlayerIdentityService` 批次已通过提交 `feat: 建立玩家身份派生与旧档隔离映射` 落盘。修正决定为：`mergeLegacy` 不得凭新名字创建合并目标；解析结果实现四字段值语义；真实平台输入遇到保守规则外名称时返回 `UNSUPPORTED_USERNAME`，其中 `EntityPlayer.getEntityName()` 返回 null 时由 adapter 隔离并以稳定文本 `<null>` 报告；管理员映射操作仍失败；持久化与追加审计明确推迟到 WorldStorage/迁移批次。保留决定为：大小写折叠符合在线玩家 `equalsIgnoreCase` 与目标 Windows 文件系统契约；`[A-Za-z0-9_]{1,16}` 不猜测 3 字符下界；plan.md §4.2 已明确身份服务属于平台能力接口，因此不移包。
+
+此前及本批次确认的平台事实：
 
 - MITE `EntityPlayer` 上**没有** `GameProfile`，也没有 UUID 访问器。
 - MITE 1.6.4 早于 Mojang 的 UUID 迁移，可验证身份**只有用户名**。
 - 上游 `QuestingAPI.getQuestingUUID()` 依赖的类和方法在 MITE 上不存在。
-
-这个探查结论需要下一个会话**独立复核**（用 `javap` 核对 mapped jar），因为它决定整个身份层的设计。
-
-推论（同样需要复核后再据以实现）：
-
-- 派生 UUID 只能是从用户名确定性推导，不是真实 Mojang UUID。
-- 改名玩家的进度无法自动关联——用户名变则派生 UUID 变。
-- 导入上游 1.7.10 存档时，档里的真实 UUID 与我们的派生 UUID **之间没有可计算的映射**。这些进度必须隔离，由管理员通过显式映射表确认，不能按名字凑对。
+- 派生 UUID 不是真实 Mojang UUID；玩家改名会形成新的逻辑身份，必须由管理员显式映射/合并。
+- 导入上游 1.7.10 存档时，档里的真实 UUID 与派生 UUID 之间没有可计算映射，故默认隔离。
 
 ### 4.2 `WorldStorage`
 

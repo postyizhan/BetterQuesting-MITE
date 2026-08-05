@@ -62,6 +62,19 @@ MITE 的 `net.minecraft.ResourceLocation` 不是纯值对象：它的构造器�
 
 **结论与工程决定：** 领域层的逻辑标识必须使用自有值类型 `com.github.postyizhan.betterquesting.api.util.ResourceKey`，不得使用 `ResourceLocation`。`ResourceKey` 保持 `domain:path` 字符串形式与 MITE 的 domain 解析规则（按首个 `:` 切分，`indexOf > 1` 时取前缀为 domain，domain 小写化，缺省 `minecraft`），因此存档与 factory ID 的文本表示与上游一致。只有客户端在真正加载纹理、声音等实际资源文件时才转换为 `ResourceLocation`，并在该处显式决定是否参与校验。
 
+## 玩家名与本地身份大小写契约
+
+以下证据均来自当前 mapped JAR 的 `javap -p -c`：
+
+1. `NetLoginHandler.handleClientProtocol(Packet2ClientProtocol)` 将包内 `getUsername()` 原样保存为 `clientUsername`，随后只调用 `StringUtils.stripControlCodes(String)`，用 `String.equals(Object)` 比较清理前后文本；没有 lowercase，也没有长度或 `[A-Za-z0-9_]` 字符集校验。因此平台登录层只明确拒绝控制码。
+2. `ServerConfigurationManager.createPlayerForUser(String)` 遍历在线玩家，以 `ServerPlayer.getCommandSenderName()` 对传入名调用 `String.equalsIgnoreCase(String)`，并踢出所有大小写变体的既有连接。`getPlayerForUsername(String)` 同样用 `equalsIgnoreCase` 查找在线玩家。服务器在线身份因此按大小写不敏感处理。
+3. `SaveHandler.writePlayerData(EntityPlayer)` 直接用 `EntityPlayer.getCommandSenderName() + ".dat.tmp"` 和 `+ ".dat"` 构造文件名；`getPlayerData(String)` 直接用传入字符串加 `.dat`。代码本身不规范化大小写。
+4. 本移植的目标运行环境是 Windows；其常用世界存档文件系统无法可靠地让仅大小写不同的两个玩家文件名代表两份独立存档。
+
+**工程决定：** BQ 使用 `Locale.ROOT` 将保守 ASCII 玩家名折叠为小写，再派生本地逻辑 UUID。这与服务端在线玩家的大小写不敏感语义及目标 Windows 存档行为一致，是有意、稳定的身份契约。不得声称该规则能够在大小写敏感文件系统上自动发现或合并两份仅大小写不同的历史玩家存档；这类来源仍需迁移报告与管理员显式决定。
+
+BQ 主动把可派生身份的输入收窄为 `[A-Za-z0-9_]{1,16}`。其中 1 字符下界是当前声明的保守边界；没有证据支持猜测为 3 字符。平台运行时若出现规则外但非 null 的名称，身份服务返回可报告的 `UNSUPPORTED_USERNAME` unresolved 结果，不能将其当作 `PlayerIdentity`；管理员 map/merge/replace 操作仍拒绝此类名称。`EntityPlayer.hasUsername()` 的字节码包含 `username == null` 防御，说明平台对象确实允许该边界；adapter 因而在调用严格的身份服务前隔离 null，并以 `<null>` 生成 unresolved 报告。
+
 ## ManyLib 2.3.1 专服风险
 
 - 发布元数据为 `environment: "*"`，main entrypoint `fi.dy.masa.malilib.ManyLib` 会加载 `ManyLibConfig`。
