@@ -23,7 +23,11 @@ class NaiveLookupLogic<T> extends LookupLogic<T> {
     @Override
     public List<DBEntry<T>> bulkLookup(int[] keys) {
         if (backingMap == null) {
-            backingMap = new HashMap<>(simpleDatabase.mapDB.size());
+            // Upstream passes the expected element count to Trove, which divides by its load factor
+            // internally. JDK HashMap treats the argument as table capacity and resizes once size
+            // exceeds capacity * 0.75, so the count is pre-divided here to keep the single-allocation
+            // behaviour of the upstream cache.
+            backingMap = new HashMap<>((int) (simpleDatabase.mapDB.size() / 0.75f) + 1);
             for (DBEntry<T> entry : getRefCache()) {
                 backingMap.put(entry.getID(), entry);
             }

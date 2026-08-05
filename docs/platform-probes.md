@@ -13,16 +13,27 @@
 
 ### Gson 只能使用 2.2.2 API 面
 
-MC 1.6.4 的运行时 classpath 只有 Gson **2.2.2**。mapped 游戏 JAR 中 `com.google.gson.JsonObject.members` 的字段类型是 `com.google.gson.internal.StringMap`；`StringMap` 只存在于 Gson 2.1–2.2.x，而 Gson 2.3 起该字段改用的 `LinkedTreeMap` 在此游戏 JAR 中不存在。launcher libraries 也明确声明 `com.google.code.gson:gson:2.2.2`，两条证据相互吻合。因此 `build.gradle` 显式固定 2.2.2，让编译期 API 与运行期一致，不得升级。
+MC 1.6.4 的运行时 classpath 只有 Gson **2.2.2**。mapped 游戏 JAR 中 `com.google.gson.JsonObject.members` 的字段类型是 `com.google.gson.internal.StringMap`，到 **2.2.4** 时该类已完全消失，`JsonObject.members` 改用 `LinkedTreeMap`（已由 javap 在本机 gson-2.2.2.jar 与 gson-2.2.4.jar 上核对；2.2.3 未在本机留存，故切换的确切版本只能界定在 2.2.2 之后、2.2.4 之前）。launcher libraries 也明确声明 `com.google.code.gson:gson:2.2.2`，两条证据相互吻合。因此 `build.gradle` 显式固定 2.2.2，让编译期 API 与运行期一致，不得升级。
 
-Gson 2.2.2 不提供以下 API：
+Gson 2.2.2 不提供以下 API（已逐条用 javap 在游戏 jar 内嵌的 Gson 上核实）：
 
 - `JsonObject.keySet()`、`JsonObject.size()`、`JsonObject.deepCopy()`；
-- `JsonArray.isEmpty()`；
-- `GsonBuilder.setLenient()`；
-- `ToNumberPolicy`、`FormattingStyle`。
+- `JsonArray.isEmpty()`、`JsonArray.remove(int)`、`JsonArray.set(int, JsonElement)`、`JsonArray.contains(JsonElement)`、`JsonArray.deepCopy()`；
+- `JsonArray.add(String/Number/Boolean)` 等便捷重载（只有 `add(JsonElement)` 和 `addAll(JsonArray)`）；
+- `JsonParser.parseString(String)` 和 `JsonParser.parseReader(Reader)` 静态方法（只有实例方法 `parse(String)` / `parse(Reader)` / `parse(JsonReader)`）；
+- `Gson.newJsonWriter(Writer)` 是 **private**，不可从外部调用；
+- `GsonBuilder.setLenient()`、`setStrictness()`、`setObjectToNumberStrategy()`、`setFormattingStyle()`；
+- `ToNumberPolicy`、`FormattingStyle` 类；
+- `JsonElement.deepCopy()`（`isJsonNull()`、`getAsJsonNull()` 存在）。
 
-阶段 3 序列化批次读写上游 `QuestDatabase.json` 等文件时，只能使用 Gson 2.2.2 的 API 面；上游 1.7.10 代码中的新版 Gson 调用不能照搬。当前可用的基础接口包括 `JsonObject.entrySet()/has/get/add/remove/addProperty`、`JsonArray.size()/get/add/addAll`、`Gson.toJson/fromJson`、`GsonBuilder.serializeNulls/setPrettyPrinting/disableHtmlEscaping/create`，以及 `JsonWriter.setIndent/setLenient/beginObject/name/value`。
+阶段 3 序列化批次读写上游 `QuestDatabase.json` 等文件时，只能使用 Gson 2.2.2 的 API 面；**上游 1.7.10 代码中凡用到以上缺失 API 的调用，均不能照搬**。当前可用的基础接口：
+
+- `JsonObject`：`entrySet()/has/get/add/remove/addProperty`
+- `JsonArray`：`size()/get(int)/add(JsonElement)/addAll(JsonArray)/iterator()`
+- `Gson`：`toJson/fromJson`（包含 `fromJson(JsonReader, Type)` 但无 `fromJson(JsonReader, Class)`）
+- `JsonParser`（实例方法）：`parse(String)/parse(Reader)/parse(JsonReader)`
+- `GsonBuilder`：`serializeNulls/setPrettyPrinting/disableHtmlEscaping/create`
+- `JsonWriter`：`setIndent/setLenient/beginObject/endObject/beginArray/endArray/name/value(String/boolean/long/double/Number)/nullValue/flush/close`
 
 ### 领域层集合不得依赖 fastutil 或 Trove
 

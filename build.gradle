@@ -37,7 +37,9 @@ dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
-    // Minecraft 1.6.4 launcher libraries lock the runtime API surface to Gson 2.2.2; do not upgrade.
+    // The game JAR already bundles Gson 2.2.2 and the launcher libraries declare the same version, so the
+    // runtime API surface is fixed. This is declared only to keep the compile surface identical; upgrading it
+    // would let the compiler accept methods that throw NoSuchMethodError in game. See docs/platform-probes.md.
     implementation("com.google.code.gson:gson:2.2.2")
 
     fml "com.github.MinecraftIsTooEasy:FishModLoader:3.4.2"
