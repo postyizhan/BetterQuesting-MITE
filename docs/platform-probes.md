@@ -35,6 +35,16 @@ Gson 2.2.2 不提供以下 API（已逐条用 javap 在游戏 jar 内嵌的 Gson
 - `GsonBuilder`：`serializeNulls/setPrettyPrinting/disableHtmlEscaping/create`
 - `JsonWriter`：`setIndent/setLenient/beginObject/endObject/beginArray/endArray/name/value(String/boolean/long/double/Number)/nullValue/flush/close`
 
+### Gson 2.2.2 无法窄化非整型字面量
+
+`LazilyParsedNumber.intValue()` 与 `longValue()` 回退到 **`BigInteger`** 而非 `BigDecimal`（已在实际 2.2.2 jar 上 javap 确认）。因此从 JSON 解析出的 `"count:3": 1.5` 或 `"count:4": 1E3` 会**抛异常**而不是截断，移植端 codec 只能把该成员降级为空字符串 tag，**原值丢失**。
+
+上游 `NBTConverter.instanceNumber` 在同样输入下同样失败，因此移植端没有"修正"这一点——修了会让移植端写出的文件与上游产生分歧。
+
+推论：`1E3` 不含小数点，上游 `fallbackTagID` 会把它判成 long 然后丢值。**手工编辑这些 JSON 文件时不能使用指数记法。**
+
+这条与 `docs/handoff.md` §5.3 的浮点/整型窄化分支是两件不同的事：后者说的是内存中 NBT tag 之间的转换方向（浮点 tag 取 floor、整型 tag 截断），此处说的是 JSON 文本解析阶段的失败。
+
 ### 领域层集合不得依赖 fastutil 或 Trove
 
 fastutil 与 Trove 均不在游戏、launcher libraries、FishModLoader、RustedIronCore 或 ManyLib 的运行时 classpath 中。本项目只有 `jar`、没有 `remapJar` 任务，因此 Loom 的 `include` 配置不能在当前构建中完成 jar-in-jar 打包；`com.github.MinecraftIsTooEasy:FastUtil:8.5.12` 坐标也只有空壳 POM，没有可供运行时加载的 JAR。

@@ -6,8 +6,8 @@
 
 ## 当前真实基线
 
-- HEAD 共 28 个提交。
-- 工作树干净；最近提交信息为 `docs: 记录身份持久化批次结论与阶段 4 平台边界`。
+- HEAD 共 30 个提交。
+- 工作树干净；最近提交信息为 `docs: 记录 JSON 序列化层结论与上游类型标记约定`。
 - `FishModLoader/` 是本地克隆的参考仓库，已进 `.gitignore`；构建实际用 Maven 坐标 `FishModLoader:3.4.2`，不引用该目录。
 - 不要把具体易变化的 HEAD hash 写入交接文档，提交信息可以记录。
 
@@ -111,7 +111,7 @@
 
 ## 3. 当前状态
 
-最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，**28 个测试类、239 个测试**全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
+最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，**31 个测试类、292 个测试**全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
 
 ### 已完成
 
@@ -286,14 +286,56 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 - 无并发测试。靠 `synchronized` 加 javadoc 声明主线程；`WorldStorage` 仍无按路径内部锁。
 - Linux 未测，异常映射可能与 Windows 不同。
 
+### 4.2d JSON 序列化层（已完成）
+
+提交 `feat: 建立 NBT 与 JSON 互转层并接入替换前 readback 校验`。这是 §4.3 第 3 项的序列化部分。
+
+落地：`core/storage/json/` 下 `NbtJsonCodec`、`JsonDocuments`、`JsonDocumentStore`、`JsonSchemaFields`、`MalformedJsonDocumentException`、`NbtJsonDiagnostics`；`NbtNumbers` 从 `api/properties/basic/` 移到 `api/util/` 并公开（git 识别为重命名）；`NbtCompat` 新增 `sortedKeys`/`elements`；`AtomicFileStorage` 补 readback 钩子。基线 **31 个测试类 292 个测试**全绿。
+
+#### 上游类型标记约定（存档兼容基准，证据 `NBTConverter.java:202-319`）
+
+- `format=true`：compound 每个 key 编码为 `"<key>:<tagId>"`（`:272`），key 先经 `TreeSet` 排序（`:267`）；**list 不再是数组而是对象**，元素 key 为 `"<index>:<tagId>"`（`:221-225`）。
+- `format=false`：裸 key（`:274`）、普通数组（`:230-238`），类型信息丢失。
+- 数值 tag（id 1..6）一律 `JsonPrimitive`（`:207-209`）；`NBTTagByteArray`/`NBTTagIntArray` **无论 format 都是普通数组**（`:240-255`），类型只能靠外层后缀恢复。
+- null 或不识别类型返回空 `JsonObject`（`:203-205`、`:256-258`）。
+
+**类型后缀必须按最后一个冒号切分**，上游 `:300` 用的就是 `key.lastIndexOf(':')`。不能改成首个冒号：属性 key 自身含冒号，`"betterquesting:editmode:1"` 必须切成 `betterquesting:editmode` 与 tagId `1`。上游 `:305-312` 的怪异分支（后缀解析失败时只在 `tags.hasKey(key)` 为真才 `continue`，否则以 `id=0` 落回裸 key）已复刻，以保证读上游存档行为一致。
+
+#### 平台差异
+
+上游 `:267` 用 `func_150296_c()` 取 key 集合，**MITE 的 `NBTTagCompound` 没有任何 key-set 方法**，只有返回裸 `Collection` 的 `getTags()`（`tagMap.values()` 活视图）。MITE 上枚举 key 的唯一路径是遍历 `getTags()` 再对每个 `NBTBase` 调 `getName()`（已 javap 核实为 `public final String`）。上游 `:409`、`:518-531` 反射访问 `NBTTagList.tagList`，MITE 有 public `tagCount()`/`tagAt(int)` 可直接用。
+
+#### `format` / `build` 上游语义（已由主代理独立核实）
+
+- **`format`** = `"3.1.0"`，定义在 `BetterQuesting.java:57`。只写在 `QuestCommandDefaults.java:207`、`:342`、`SaveLoadHandler.java:307`，**全仓无读取点**——上游没有任何 format 版本分支，它纯粹是标记。移植端原样保留。
+- **`build`** 写在 `SaveLoadHandler.java:309`、读在 `:197`，是上游**唯一**的版本分支：`equalsIgnoreCase` 不匹配时把五个数据库复制进 `backup/<storedVersion>/`。因为只有 `saveConfig` 写它，默认任务包只有 `format` 没有 `build`，所以**缺失 `build` 必须视为需要升级**。
+- **`mitePortFormat`** 新增，值 `"1"`，仅在移植端布局变更时递增；缺失即表示文件由上游写出。
+
+#### Gson 2.2.2 的数值陷阱（新发现）
+
+`LazilyParsedNumber.intValue()`/`longValue()` 回退到 **`BigInteger`** 而非 `BigDecimal`。因此解析出的 `"count:3": 1.5` 或 `"count:4": 1E3` 会**抛异常**而非截断，codec 把该成员降级为空字符串 tag、**值丢失**。上游 `instanceNumber` 同样失败，故未"修"（修了会让移植端写出的文件与上游分歧）。推论：`1E3` 不含小数点，`fallbackTagId` 会判成 long 然后丢值，**手工编辑这些文件时不能用指数记法**。
+
+#### 已知未做
+
+- **无生产调用方**：`JsonDocumentStore`/`JsonSchemaFields` 尚无调用点，`SaveLoadHandler` 等价物、`LegacyQuestImporter`、golden fixture 都还没做。`stamp(root, build)` 的 build 串靠参数传入，因为还没有解析 mod 版本的途径（上游用 `Loader.instance().activeModContainer().getVersion()`，需要 FML 侧 supplier）。
+- **从未用真实上游 1.7.10 世界写出的 `QuestDatabase.json` 验证过**。往返只在自产文档上证明，格式规则逐条对着上游行号复刻。这是唯一能闭合兼容性声明的检查，缺 1.7.10 世界做不了。
+- `format=false` 下 byte[] 与 int[] 真正不可区分，都降级为 long list。
+- quarantine 是 copy 而非 move（与上游一致），重复失败会覆盖上一份隔离副本；且用 `writeAtomically` 复制会整文件进内存。
+- `NbtJsonDiagnostics.IGNORE` 是默认，异常在游戏内目前静默，需平台接线传入 logger。
+- `mitePortFormat` 无迁移分支，`readMitePortFormat` 生产未用。
+
+#### 有意偏离上游
+
+streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无序，而 `SaveLoadHandler.java:314` 用的正是 streaming 路径，故上游实际产出是 hash 序；JSON 成员顺序无语义，上游仍可读）；plain 模式的 list 补上 `endArray()`（上游 `:166-171` 调了 `beginArray()` 却从不 `endArray()`，会让其后每个 tag 错位，因唯一 streaming 调用方传 `format=true` 而潜伏）；`fallbackTagId` 不复刻上游 `:474-510` 的数组扫描（扫完在 `:510` 无条件覆盖为 `9`，不可观测）；非 object 文档拒绝而非静默返回空（上游对空文件返回 null 并让调用方走默认值，会让截断的数据库在下次保存时被空库替换）；null NBT 载荷降级为空值（MITE 单参构造器留 null，1.7.10 不可达）。
+
 ### 4.3 存档/迁移剩余
 
 第 1、4 项已完成（见 §4.2）；读侧与追加写前置已完成（见 §4.2b）。以下项目均未完成，不得在后续报告中声称已落地：
 
 1. ~~完成 `WorldStorage` 世界目录解析及所需 access widener 或 invoker/accessor。~~ 已完成。
 2. ~~持久化身份映射并建立追加审计；迁移报告必须记录身份来源和管理员决定。~~ 已完成，见 §4.2c。
-3. 保留原 `format`、`build`、任务 ID、属性 key 和 UUID 表示，另增 `mitePortFormat` 表示移植端 schema。
-4. ~~实现原子文件写入与带时间戳备份。~~ 已完成，但备份改为显式调用而非每次写入隐式生成（对齐上游，见 §4.2 H1）。
+3. 序列化层与字段语义已完成，见 §4.2d；剩余部分是把 codec 接到各数据库的读写路径（批次 B4）。
+4. ~~实现原子文件写入与带时间戳备份。~~ 已完成，但备份改为显式调用而非每次写入隐式生成（对齐上游，见 §4.2 H1）。替换前的 readback 校验已于 §4.2d 补齐。
 5. 建立 JSON/NBT golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度、损坏/截断/超大文件。
 6. 实现 `LegacyQuestImporter`；旧 `QuestProgress.json` 转换为逐玩家文件后必须保留原件。
 7. 周期 autosave、world save、server stop 均触发 flush；server stop 必须等待待处理 I/O 完成。
@@ -306,7 +348,9 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 
 1. 先核对 `git status`、`git log` 和当前测试数。
 2. 再读取 `plan.md` 阶段 3 与 `docs/platform-probes.md`。
-3. 派 writer 实现 §4.3 第 3 项的 **JSON 序列化层**（批次代号 B2）：Gson 2.2.2 边界内的 NBT↔JSON codec，外加 `writeAtomically` 的 readback 校验钩子（上游 move 前会把 tmp 重新解析一遍，当前只有 TODO，见 §4.2「已知未做」）。这批**必须**先读 `platform-probes.md` 的 2.2.2 可用 API 清单——上游 1.7.10 用的 `JsonParser.parseString`、`JsonArray.remove/isEmpty`、`JsonObject.keySet/size` 一概不能照搬。保留 `format`/`build` 并新增 `mitePortFormat`。注意 §8 架构债：领域层直接暴露 `net.minecraft.NBT*`，reviewer 曾建议在本阶段建立单一 `PropertyNbtCodec` 适配层，可在此批次一并考虑。
+3. 派 writer 做 **golden fixture 套件**（批次 B3，§4.3 第 5 项）：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度、损坏/截断/超大文件。codec 已就绪（§4.2d），所以本批次可直接用。**最高价值的一件事**是补上 §4.2d「已知未做」里那条缺口——目前从未用真实上游 1.7.10 世界写出的 `QuestDatabase.json` 验证过往返，只在自产文档上证明。若能拿到真实上游存档，优先做这条；拿不到就明确记录为未闭合，不要声称兼容性已验证。注意 §8：领域层直接暴露 `net.minecraft.NBT*`，故 fixture 测试必须带 Minecraft classpath 跑，不能当纯 JVM 单元测试。
+
+   之后是 B4：把 codec 接到 `QuestDatabase`/`QuestLineDatabase`/`PartyManager`/`QuestSettings` 的读写路径。reviewer 曾建议建立单一 `PropertyNbtCodec` 适配层（§8），可在 B4 一并考虑。
 4. 派 reviewer 复审该批次。**reviewer 主模型直接指定 `S3AI/claude-opus-5`**，不要用配置文件里的 `geek2-claude/claude-opus-5`（本会话连续两次中途断连）。
 5. 主代理核实相关 `javap` owner/字段/descriptor 与测试结果，用反转法验证关键修复，再提交。
 
@@ -417,6 +461,8 @@ MITE 的 `ChatAllowedCharacters.allowedCharacters` 是 **`String`**，内容来�
 | `core/storage/AtomicFileStorage.java` | 写入**同步**完成，`writeAndSync` 额外做 `getFD().sync()` | 上游走 `BQThreadedIO.DISK_IO`（4 线程池）异步写且不 fsync。移植端先同步以保证 server stop 不丢数据。若后续为主线程性能引入异步队列，`WorldStorage.flush()` 必须 join 该队列，否则 stop 会静默丢数据。 |
 | `core/storage/AtomicFileStorage.java` | 备份仅在显式调用 `backup()` 时产生，名为带 UTC 时间戳的 `<file>.<ts>.bak` | 上游正常保存路径（`JsonHelper.WriteToFile2`）完全不备份，只在解析失败时写固定名 `malformed_<name>.json`、版本升级时写 `backup/<ver>/`。移植端保持正常写入不备份，以免每玩家每 autosave 周期堆积无上限副本；但备份名改为时间戳，避免覆盖历史证据。 |
 | `core/BetterQuestingConstants.java` | 探针 channel 用 3 参 `ResourceLocation(..., false)` 显式跳过资源校验 | 2 参构造器字节码 `iconst_1` 证明默认 `verify=true`，会把实例登记进 `resources_to_verify`；集成服务器每 20 tick 校验，而 channel 不是真实资源文件，故单人模式 HUD 会持续渲染红字。文本值不变，wire 兼容性不受影响。见 §5.1。 |
+| `core/storage/json/NbtJsonCodec.java` | streaming 路径也排序 key；plain 模式 list 补 `endArray()`；`fallbackTagId` 不复刻数组扫描；null 载荷降级为空值 | 详见 §4.2d「有意偏离上游」。其中 `endArray()` 是修上游真缺陷（`NBTConverter.java:166-171` 会让其后每个 tag 错位，因唯一 streaming 调用方传 `format=true` 而潜伏）。 |
+| `core/storage/json/JsonDocuments.java` | 非 object 文档抛异常拒绝，不静默返回空 | 上游 `fromJson` 对空文件返回 null 并让调用方走默认值，会让截断的数据库在下次保存时被空库替换。 |
 | `core/identity/` 全体 | 映射快照与审计日志用纯文本自校验行，非 JSON | 上游没有身份映射与审计的对应物（1.7.10 有可验证的 Mojang UUID），故这是新增而非偏离。选纯文本是为规避 Gson 2.2.2 的 API 缺失面，见 §4.2c。 |
 | `core/storage/StoragePaths.java` | 非法路径抛 `IOException` 拒绝，不做字符替换 | 上游 `JsonHelper.makeFileNameSafe` 把非法字符替换成 `_`，静默改名。存储边界宁可拒绝也不静默改写玩家进度文件名。另额外拒绝 Windows 保留设备名，上游禁用集不含这些，见 §5.4。 |
 
