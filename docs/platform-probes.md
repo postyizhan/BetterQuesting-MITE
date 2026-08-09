@@ -51,6 +51,33 @@ Java 没有跨平台父目录 fsync，Windows 尤其无法通过标准 API 完�
 
 上游 `JsonHelper.ReadFromFile` 对文件名使用 `contains(".DS_Store")` 与 `contains("malformed_")`，而且过滤发生在读取阶段，不是前缀匹配。移植端没有对应的读取跳过层，因此有意把这两项 contains 过滤合并到 `list` 枚举边界，避免迁移世界中的 malformed 文件被当作正常进度输入。
 
+## Custom payload 长度边界与包处理线程
+
+以下事实由主代理用 `javap -p -c` 在当前 mapped JAR 上核实，直接影响阶段 4 的分片协议设计。
+
+### `Packet250CustomPayload` 收发侧比较符不对称
+
+- 构造器 `(String,byte[])`：`sipush 32767` 后接 **`if_icmple`**，即允许 `length <= 32767`，恰好 32767 字节可以发出去。
+- `readPacketData(DataInput)`：先 `readShort()` 存入 `length`，随后两道跳转才分配数组——`ifle`（`length <= 0` 跳过）与 `sipush 32767` + **`if_icmpge`**（`length >= 32767` 跳过），只有都不成立才执行 `newarray byte` + `readFully`。
+
+因此恰好 32767 字节的载荷能通过构造器发送，但对端会跳过 `readFully` 并把 `data` 留在 `null`，**静默丢失整个包体且不报错**。移植端可用载荷上限是 **32766**，不是 32767。
+
+`length` 由 `readShort()` 读取（有符号），且上述失败分支不消费声明的字节数。接收侧 handler 必须先判 `data == null` 并显式拒绝，否则恶意客户端只要声明 `length` 为 0、负数或 ≥32767 即可触发 NPE。
+
+分片单片上限应按 32766 减去外层 NBT 容器开销核算，不得照搬上游 `PacketAssembly` 的 `bufSize = 20480`（该值本身在上限内，但上游把分片再包进一层外层 NBT，需重新核算）。
+
+### 服务端包处理本就在主线程
+
+完整调用链：`MinecraftServer` tick 内 `getNetworkThread()` → `NetworkListenThread.networkTick()` → 遍历 `connections` 调各 `NetServerHandler.networkTick()` → `INetworkManager.processReadPackets()` → `handleCustomPayload(Packet250CustomPayload)` → RIC required mixin 在该方法 RETURN 处 → `Packet.apply(EntityPlayer)`。
+
+上游 1.7.10 走 netty pipeline，handler 在网络线程执行，故 `PacketQuesting` 必须用 `proxy.scheduleServerTask(...)`（服务端）与 `Minecraft.func_152343_a(...)`（客户端）跳回主线程。MITE 1.6.4 是 tick 排空读包队列的旧模型，`processReadPackets` 在服务端主线程被调用，业务 handler 因此天然在主线程。另经核实 MITE `MinecraftServer` 既无 `callable`/`FutureTask`/queue/schedule 成员，也不实现 `IThreadListener`（1.7.x 才有），照搬上游写法无处落地。
+
+**结论：阶段 4 服务端不要为「跳回主线程」新建 tick 队列，那是不存在的问题。** 仍需独立确认两点：客户端侧 `NetClientHandler` 的排空点是否同样在客户端主线程；RIC mixin 是否在 `apply` 外层自带线程切换。
+
+### 上游分片缺失的安全边界
+
+`PacketAssembly.java:35` 为 `bufSize = 20480`；分片容器只有 `size`/`index`/`end`/`data` 四个字段（`:55-57`），**没有 transfer ID**。服务端按玩家 UUID 单槽，客户端只有一个全局 `serverBuf`。登录同步连发 8 类包，任何交错或丢片即静默串包。移植端必须新增 transfer ID、`size` 上限、片数上限、解压后大小上限（防 zip bomb）、`index` 边界校验、超时与断线清理、每玩家并发 transfer 上限。
+
 ## Access Widener 状态
 
 `src/main/resources/betterquesting.accesswidener` 已落地：

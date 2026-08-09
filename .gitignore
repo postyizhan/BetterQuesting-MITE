@@ -39,6 +39,9 @@ run/
 # 仅本地参考的上游源码，不进版本库
 retroEMI-MITE-master/
 
+# 本地克隆的加载器源码，仅供查阅；构建实际使用 Maven 坐标 FishModLoader:3.4.2
+FishModLoader/
+
 # java
 
 hs_err_*.log
