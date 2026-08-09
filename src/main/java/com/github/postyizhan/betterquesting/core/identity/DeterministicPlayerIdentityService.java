@@ -81,6 +81,70 @@ public final class DeterministicPlayerIdentityService implements PlayerIdentityS
         return Collections.unmodifiableMap(new HashMap<>(legacyMappings));
     }
 
+    /**
+     * Replaces every mapping with a previously persisted snapshot.
+     *
+     * <p>This bypasses the {@code map}/{@code merge}/{@code replace} guards on purpose: a valid
+     * snapshot can legitimately contain many-to-one mappings created by earlier explicit merges, and
+     * replaying those through {@link #mapLegacy} would be rejected. It is not an alternative path
+     * for creating mappings; it only reinstates decisions an administrator already made and that
+     * were already audited.
+     *
+     * <p>Each entry must be keyed by its own legacy UUID, carry a resolved identity, and carry an
+     * identity whose UUID is the value derived from its own normalized username
+     * ({@link #requireDerivedIdentity}). Without that last check a mislabelled entry loads cleanly
+     * and keys progress to one player while displaying another.
+     *
+     * <p>Many-to-one mappings remain accepted, because {@link #mergeLegacy} legitimately creates
+     * them and does not call {@code requireUnusedIdentity}.
+     */
+    public synchronized void restoreMappings(Map<UUID, PlayerIdentityResolution> snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        Map<UUID, PlayerIdentityResolution> validated = new HashMap<>();
+        for (Map.Entry<UUID, PlayerIdentityResolution> entry : snapshot.entrySet()) {
+            UUID legacyUuid = Objects.requireNonNull(entry.getKey(), "legacyUuid");
+            PlayerIdentityResolution resolution = Objects.requireNonNull(entry.getValue(), "resolution");
+            if (!resolution.resolved()) {
+                throw new IllegalArgumentException("restored mapping has no identity: " + legacyUuid);
+            }
+            if (!legacyUuid.equals(resolution.legacyUuid().orElse(null))) {
+                throw new IllegalArgumentException("restored mapping key does not match its resolution: " + legacyUuid);
+            }
+            requireDerivedIdentity(resolution.identity().orElseThrow());
+            validated.put(legacyUuid, resolution);
+        }
+        legacyMappings.clear();
+        legacyMappings.putAll(validated);
+    }
+
+    /**
+     * Rejects an identity whose UUID is not the value this service derives from its own normalized
+     * username.
+     *
+     * <p>Without this cross-field check a hand-edited record such as
+     * {@code <bob's derived UUID> | "alice"} loads with no rejection, so progress is keyed to bob
+     * while every report and UI shows alice.
+     *
+     * <p>This also makes a change to {@link #USERNAME_NAMESPACE} or to the case-folding rule fail
+     * loudly instead of silently splitting one player into two identities. Absorbing that case
+     * quietly is not an option, because the check could then no longer tell a rule change apart from
+     * a forgery. Such a change is a breaking save-format change and needs an explicit migration.
+     *
+     * <p>A self-mapping, where the legacy UUID equals the derived identity UUID, is deliberately
+     * still accepted. Rejecting it only on the read path would make a mapping that
+     * {@link #mapLegacy} accepts unloadable after a restart, breaking a world over an astronomically
+     * unlikely collision. Once derivation is verified a self-map carries no ambiguity.
+     */
+    static void requireDerivedIdentity(PlayerIdentity identity) {
+        Objects.requireNonNull(identity, "identity");
+        PlayerIdentity derived = identityForValidUsername(identity.normalizedUsername());
+        if (!derived.id().equals(identity.id())) {
+            throw new IllegalArgumentException("identity UUID " + identity.id()
+                + " is not the value derived from username " + identity.normalizedUsername()
+                + " (expected " + derived.id() + ")");
+        }
+    }
+
     private void requireUnmappedLegacy(UUID legacyUuid) {
         Objects.requireNonNull(legacyUuid, "legacyUuid");
         if (legacyMappings.containsKey(legacyUuid)) {
