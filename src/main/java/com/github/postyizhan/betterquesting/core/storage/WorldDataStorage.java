@@ -198,6 +198,15 @@ public final class WorldDataStorage {
         atomicFiles.write(resolve(relativePath), writer);
     }
 
+    /**
+     * Replaces a file only if {@code validator} accepts the finished temporary file. Format
+     * knowledge stays with the caller; this class never inspects the payload.
+     */
+    public void writeAtomically(String relativePath, AtomicFileStorage.OutputWriter writer,
+        AtomicFileStorage.ReadbackValidator validator) throws IOException {
+        atomicFiles.write(resolve(relativePath), writer, validator);
+    }
+
     public Optional<Path> backup(String relativePath) throws IOException {
         return atomicFiles.backup(resolve(relativePath));
     }

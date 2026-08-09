@@ -68,6 +68,17 @@ public interface WorldStorage {
      */
     void writeAtomically(String relativePath, OutputWriter writer) throws IOException;
 
+    /**
+     * Replaces a file only if {@code validator} accepts the finished temporary file, reproducing the
+     * parse-before-move check in upstream {@code JsonHelper.WriteToFile2}. When the validator
+     * throws, the existing target is left untouched and the temporary file is removed.
+     *
+     * <p>The validator is a parameter, not storage configuration, because this boundary carries both
+     * JSON documents and the plain-text identity records, which have no JSON structure to check.
+     */
+    void writeAtomically(String relativePath, OutputWriter writer, ReadbackValidator validator)
+        throws IOException;
+
     Optional<Path> backup(String relativePath) throws IOException;
 
     void flush() throws IOException;
@@ -84,5 +95,18 @@ public interface WorldStorage {
          * writer must flush that wrapper before returning.
          */
         void write(OutputStream output) throws IOException;
+    }
+
+    /**
+     * Re-reads a finished temporary file and rejects it before it replaces the target. Throwing
+     * rejects; returning normally authorizes the replacement.
+     */
+    @FunctionalInterface
+    interface ReadbackValidator {
+        /** Accepts anything, skipping the readback entirely. */
+        ReadbackValidator NONE = input -> {
+        };
+
+        void validate(InputStream input) throws IOException;
     }
 }

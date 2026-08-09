@@ -41,6 +41,41 @@ class NbtCompatTest {
     }
 
     @Test
+    void sortedKeysAreAscendingAndSnapshotTheLiveTagView() {
+        NBTTagCompound tag = new NBTTagCompound();
+        assertEquals(java.util.List.of(), NbtCompat.sortedKeys(tag));
+        assertEquals(java.util.List.of(), NbtCompat.sortedKeys(null));
+
+        tag.setInteger("zebra", 1);
+        tag.setInteger("alpha", 2);
+        tag.setInteger("mid", 3);
+        assertEquals(java.util.List.of("alpha", "mid", "zebra"), NbtCompat.sortedKeys(tag));
+
+        // getTags() is a live view over tagMap.values(), so removal during iteration would throw
+        // without the snapshot.
+        assertDoesNotThrow(() -> {
+            for (String key : NbtCompat.sortedKeys(tag)) {
+                tag.removeTag(key);
+            }
+        });
+        assertTrue(tag.hasNoTags());
+    }
+
+    @Test
+    void elementsCopyListContentsInOrder() {
+        assertEquals(java.util.List.of(), NbtCompat.elements(null));
+
+        NBTTagList list = new NBTTagList("");
+        assertEquals(java.util.List.of(), NbtCompat.elements(list));
+
+        NBTTagInt first = new NBTTagInt("", 1);
+        NBTTagString second = new NBTTagString("", "x");
+        list.appendTag(first);
+        list.appendTag(second);
+        assertEquals(java.util.List.of(first, second), NbtCompat.elements(list));
+    }
+
+    @Test
     void compoundAtRejectsOtherElementTypes() {
         NBTTagList compounds = new NBTTagList("");
         NBTTagCompound compound = new NBTTagCompound("");

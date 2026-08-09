@@ -82,6 +82,12 @@ public final class DirectoryWorldStorage implements WorldStorage {
     }
 
     @Override
+    public void writeAtomically(String relativePath, OutputWriter writer, ReadbackValidator validator)
+        throws IOException {
+        storage.writeAtomically(relativePath, writer::write, validator::validate);
+    }
+
+    @Override
     public Optional<Path> backup(String relativePath) throws IOException {
         return storage.backup(relativePath);
     }

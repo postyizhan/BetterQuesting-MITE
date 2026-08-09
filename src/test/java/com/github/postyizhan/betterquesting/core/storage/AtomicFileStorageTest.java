@@ -176,6 +176,61 @@ class AtomicFileStorageTest {
         assertDoesNotThrow(() -> StoragePaths.resolveWithin(root, "players/console.json"));
     }
 
+    @Test
+    void readbackValidatorSeesExactlyTheBytesThatWereWritten() throws IOException {
+        Path target = temporaryDirectory.resolve("QuestDatabase.json");
+        AtomicBoolean invoked = new AtomicBoolean();
+
+        storage().write(target,
+            output -> output.write("payload".getBytes(StandardCharsets.UTF_8)),
+            input -> {
+                invoked.set(true);
+                assertEquals("payload", new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            });
+
+        assertTrue(invoked.get());
+        assertEquals("payload", Files.readString(target));
+    }
+
+    @Test
+    void rejectedReadbackLeavesTheExistingTargetUntouchedAndRemovesTheTemporaryFile() {
+        Path target = temporaryDirectory.resolve("QuestDatabase.json");
+        assertDoesNotThrow(() -> Files.writeString(target, "previous"));
+
+        IOException rejection = assertThrows(IOException.class, () -> storage().write(target,
+            output -> output.write("corrupt".getBytes(StandardCharsets.UTF_8)),
+            input -> {
+                throw new IOException("unparseable");
+            }));
+
+        assertEquals("unparseable", rejection.getMessage());
+        assertDoesNotThrow(() -> assertEquals("previous", Files.readString(target)));
+        assertDoesNotThrow(() -> assertEquals(List.of("QuestDatabase.json"), fileNames(temporaryDirectory)));
+    }
+
+    @Test
+    void rejectedReadbackDoesNotCreateAMissingTarget() {
+        Path target = temporaryDirectory.resolve("QuestDatabase.json");
+
+        assertThrows(IOException.class, () -> storage().write(target,
+            output -> output.write("corrupt".getBytes(StandardCharsets.UTF_8)),
+            input -> {
+                throw new IOException("unparseable");
+            }));
+
+        assertFalse(Files.exists(target));
+        assertDoesNotThrow(() -> assertEquals(List.of(), fileNames(temporaryDirectory)));
+    }
+
+    @Test
+    void defaultWriteOverloadSkipsValidationSoPlainTextCallersAreUnaffected() throws IOException {
+        Path target = temporaryDirectory.resolve("LegacyIdentityMappings.txt");
+
+        storage().write(target, output -> output.write("BQIDMAP1|0|0\n".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals("BQIDMAP1|0|0\n", Files.readString(target));
+    }
+
     private AtomicFileStorage storage() {
         return new AtomicFileStorage(Clock.fixed(FIXED_TIME, ZoneOffset.UTC),
             new AtomicFileStorage.NioMoveStrategy());

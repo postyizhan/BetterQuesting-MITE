@@ -1,5 +1,6 @@
 package com.github.postyizhan.betterquesting.api.properties.basic;
 
+import com.github.postyizhan.betterquesting.api.util.NbtNumbers;
 import com.github.postyizhan.betterquesting.api.util.ResourceKey;
 import net.minecraft.NBTBase;
 import net.minecraft.NBTTagDouble;
