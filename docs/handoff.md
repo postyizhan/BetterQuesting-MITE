@@ -6,8 +6,9 @@
 
 ## 当前真实基线
 
-- HEAD 共 24 个提交，相对 `origin/main` ahead 23 个。
-- 工作树干净；最近提交信息为 `fix: 追加写分帧隔离崩溃残片并补齐审计日志读侧`。
+- HEAD 共 28 个提交。
+- 工作树干净；最近提交信息为 `docs: 记录身份持久化批次结论与阶段 4 平台边界`。
+- `FishModLoader/` 是本地克隆的参考仓库，已进 `.gitignore`；构建实际用 Maven 坐标 `FishModLoader:3.4.2`，不引用该目录。
 - 不要把具体易变化的 HEAD hash 写入交接文档，提交信息可以记录。
 
 ---
@@ -110,7 +111,7 @@
 
 ## 3. 当前状态
 
-最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，24 个测试类、188 个测试全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
+最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，**28 个测试类、239 个测试**全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
 
 ### 已完成
 
@@ -252,12 +253,45 @@ accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
 - **同路径并发无内部锁**。两个类的 javadoc 都声明必须在服务端主线程调用或由调用方串行化。上游靠 `BQThreadedIO` 单线程队列做这件事，移植端取消了那层队列却没有替代物。若下一批次要从网络线程写审计，必须改成按路径加锁。
 - `list` 的 `Files.isRegularFile` 会把 stat 失败当作非普通文件静默省略，上游则会交给读取阶段并至少记日志。已在 javadoc 登记。
 
+### 4.2c 身份映射持久化与追加审计（已完成）
+
+提交 `feat: 持久化身份映射并建立自校验追加审计`。这是 §4.3 第 2 项。
+
+落地文件：`core/identity/` 下 `IdentityRecordCodec`、`IdentityRecordFields`、`IdentityRecordFormatException`、`FramedLines`、`IdentityAuditOperation`、`IdentityAuditRecord`、`IdentityAuditReport`、`IdentityRecordRejection`、`IdentityAuditLog`、`LegacyMappingStore`、`CorruptIdentityMappingException`、`PersistentPlayerIdentityService`；`core/storage/DirectoryWorldStorage`；`platform/fml/ServerIdentityContext`。`DeterministicPlayerIdentityService` 新增 `restoreMappings` 与 `requireDerivedIdentity`，`MiteWorldStorage` 改为委派 `DirectoryWorldStorage`，`CommonBootstrap` 接线 bind/unbind。
+
+**格式是纯文本自校验行，不用 JSON**，因此完全不碰 Gson 2.2.2 的限制。审计日志 `identity/IdentityAudit.log` 为 magic `BQIDAUDIT1` 加 10 个 `|` 分隔字段，末字段 CRC32；映射文件 `identity/LegacyIdentityMappings.txt` 为 `BQIDMAP1|<recordCount>|<crc32>` header 加逐条 `BQIDMAPREC1|...`，按 legacy UUID 排序以保证字节稳定。校验六道：字段数、magic、校验和、转义合法性、字段规范形式、重编码一致性。header 记录数校验是**整行删除唯一的检测手段**，逐行校验和查不出这种篡改。
+
+基线：28 个测试类 **239** 个测试全绿。
+
+#### 异源审核修掉的两个 Blocker
+
+reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现的，再次印证同源盲区。两条都由主代理独立核实后修掉并用反转法 1:1 归因。
+
+**Bk1 审计序列号在「完整记录仅丢失末尾 LF」后被重用**。危险残片不是截断记录（那些必然栽在字段数检查上），而是校验和完全合法、只缺末尾 LF 的完整记录——正是 `appendLine` 分帧守卫存在的那个场景。后果链：重启时该行进 rejections、`highest` 跳过它 → 下次写入重用同一序号 → `appendLine` 补的 LF 恰好把残片终结成合法行 → 此后每次读取都接受崩溃期那行、**永久拒绝新写入的合法记录**。快照里有该映射，审计日志却永远不展示它。一次掉电即可触发，无需篡改。现 `initializeSequenceFromStorage` 一并遍历 `rejections()` 并用 `lenientSequence` 从被拒行解析序号。反转验证：恰好 1 个测试失败。
+
+**Bk2 `restoreMappings` 不校验 identity UUID 与用户名的派生一致性**。`<bob 的派生 UUID> | "alice"` 可零拒绝加载，进度按 identity UUID 记到 bob 名下而所有界面显示 alice；自映射同样被接受。可达路径除手改文件外还有两条：后续 writer/迁移工具构造出不一致的字段对；**派生规则（namespace 或折叠规则）一旦变更**，旧文件静默保留旧 UUID 而 `resolveUsername` 返回新 UUID，同一玩家裂成两个身份——现在这种情况会显式报错而非静默，属破坏性存档格式变更，需显式迁移。现新增 `requireDerivedIdentity` 做跨字段校验。反转验证：恰好 2 个测试失败。
+
+多对一映射**仍然接受**，因为 `mergeLegacy` 不调 `requireUnusedIdentity`，它是合法产物（已核实上游行为）。自映射也保留，理由是只在读路径拒绝会让 `mapLegacy` 接受的映射在重启后无法加载。
+
+#### 同批修正的测试缺陷
+
+三处测试把 `test_player` 的派生 UUID `536d10cf-c585-5a3e-9060-f818e26945f6` 当作 `alice` 的身份。主代理用 Python `uuid.uuid5` 以代码里的 namespace 独立验算：`test_player` → `536d10cf…`、`alice` → `defc59df-21a5-5a2d-b766-35e73bfb50ec`、`bob` → `e30601a1-c438-5ade-af4d-f7e0d601a30f`。这批 round-trip 测试**依赖 Bk2 的缺陷才通过，把缺陷固化成了规范**——修好 Bk2 后它们会变红。这是反转法查不出、只有异源审核能发现的那类问题，与 §1 记录的 `appendLine` 案例同源。`DeterministicPlayerIdentityServiceTest` 里配 `test_player` 的三处用法本来就对，未动。
+
+#### 已知未做
+
+- **写序缺口**：审计 append 先于快照 save。审计失败回滚内存；快照失败但审计已成功时内存已应用、审计有记录、磁盘陈旧，抛 `UncheckedIOException`，调用方吞掉即内存/磁盘分歧。选这个方向是因为反序会让崩溃窗口产生「无审计记录的已应用变更」。下一次成功 mutation 会整份重写快照，分歧可自愈。
+- **`ServerIdentityContext` 零自动化测试**，依赖 `MinecraftServer`，只有编译与人眼核对。RIC server-started listener 是否确实在 `loadAllWorlds` 之后触发**未经运行验证**。生命周期约束本身已核对成立：`bind` 先 `unbind` 再每次新建 `MiteWorldStorage`，`current(server)` 用 `boundServer != server` 引用比较拒绝跨世界复用。
+- **header-only 且 `count=0` 的文件与合法空快照字节完全相同**，从新世界复制一个过来即可静默清空全部映射并绕过 CRC。reviewer 建议启动时按 sequence 重放审计得净效果与快照对账——这也是目前审计日志唯一能发挥作用之处，否则它是只写的。
+- CRC32 只防意外损坏与截断，**不防篡改**，对有文件写权限者无效。
+- 无并发测试。靠 `synchronized` 加 javadoc 声明主线程；`WorldStorage` 仍无按路径内部锁。
+- Linux 未测，异常映射可能与 Windows 不同。
+
 ### 4.3 存档/迁移剩余
 
 第 1、4 项已完成（见 §4.2）；读侧与追加写前置已完成（见 §4.2b）。以下项目均未完成，不得在后续报告中声称已落地：
 
 1. ~~完成 `WorldStorage` 世界目录解析及所需 access widener 或 invoker/accessor。~~ 已完成。
-2. 持久化身份映射并建立追加审计；迁移报告必须记录身份来源和管理员决定，这是 plan.md 阶段 3 第 7 条的硬要求。
+2. ~~持久化身份映射并建立追加审计；迁移报告必须记录身份来源和管理员决定。~~ 已完成，见 §4.2c。
 3. 保留原 `format`、`build`、任务 ID、属性 key 和 UUID 表示，另增 `mitePortFormat` 表示移植端 schema。
 4. ~~实现原子文件写入与带时间戳备份。~~ 已完成，但备份改为显式调用而非每次写入隐式生成（对齐上游，见 §4.2 H1）。
 5. 建立 JSON/NBT golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度、损坏/截断/超大文件。
@@ -272,13 +306,15 @@ accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
 
 1. 先核对 `git status`、`git log` 和当前测试数。
 2. 再读取 `plan.md` 阶段 3 与 `docs/platform-probes.md`。
-3. 派 writer 实现 §4.3 第 2 项**持久化身份映射与追加审计**。读侧与 `appendLine` 已就绪（§4.2b），所以本批次可以直接用。两个硬约束：一是 **审计记录格式必须自校验**（分帧守卫不识别残片，见 §4.2b）；二是必须处理 §4.2 的生命周期约束（不得静态缓存 `MiteWorldStorage`、不得在 world load 前 `resolve()`）。还要注意运行时 Gson 只有 2.2.2（§5.5），写 JSON 前先读 `platform-probes.md` 的可用 API 清单。
+3. 派 writer 实现 §4.3 第 3 项的 **JSON 序列化层**（批次代号 B2）：Gson 2.2.2 边界内的 NBT↔JSON codec，外加 `writeAtomically` 的 readback 校验钩子（上游 move 前会把 tmp 重新解析一遍，当前只有 TODO，见 §4.2「已知未做」）。这批**必须**先读 `platform-probes.md` 的 2.2.2 可用 API 清单——上游 1.7.10 用的 `JsonParser.parseString`、`JsonArray.remove/isEmpty`、`JsonObject.keySet/size` 一概不能照搬。保留 `format`/`build` 并新增 `mitePortFormat`。注意 §8 架构债：领域层直接暴露 `net.minecraft.NBT*`，reviewer 曾建议在本阶段建立单一 `PropertyNbtCodec` 适配层，可在此批次一并考虑。
 4. 派 reviewer 复审该批次。**reviewer 主模型直接指定 `S3AI/claude-opus-5`**，不要用配置文件里的 `geek2-claude/claude-opus-5`（本会话连续两次中途断连）。
 5. 主代理核实相关 `javap` owner/字段/descriptor 与测试结果，用反转法验证关键修复，再提交。
 
 ### 4.5 已知残余风险
 
-身份映射尚未持久化；尚无追加审计（存储能力已就绪，但无任何调用方）；`MitePlayerIdentityAdapter` 尚未用真实 `EntityPlayer` 做测试；container GUI blocker 仍存在。
+身份映射已持久化、追加审计已有调用方（§4.2c），但该批次自身的残余风险见 §4.2c「已知未做」——其中**写序缺口**与 **header-only 文件可静默清空全部映射**两条最值得下一批次关注。
+
+仍然存在的：`MitePlayerIdentityAdapter` 尚未用真实 `EntityPlayer` 做测试；`ServerIdentityContext` 零自动化测试且 RIC server-started 触发时机未经运行验证；container GUI blocker 仍存在。
 
 `WorldStorage` 的残余风险分两处：§4.2「已知未做」（无 readback 校验、生命周期绑定未接线、符号链接可绕过词法守卫、`MiteWorldStorage` 无测试、POSIX 权限未实测）与 §4.2b「已知未做」（无父目录 fsync、无故障注入测试、同路径并发无内部锁、Linux 异常映射未实测）。§4.2 的「纯写侧接口」一条已由 §4.2b 解决。
 
@@ -333,6 +369,14 @@ MITE 的 `ChatAllowedCharacters.allowedCharacters` 是 **`String`**，内容来�
 
 上游 `JsonHelper.makeFileNameSafe` 遍历的是 1.7.10 中 `char[]` 类型的 `allowedCharacters`，对应 MITE 的 `allowedCharactersArray`，**不是**同名 String 字段。照搬会同时犯两个错：把客户端 `/font.txt` 资源依赖引进服务端，以及用完全错误的过滤集。该禁用集也不含 Windows 保留设备名，`StoragePaths` 另行拒绝了 `CON`/`NUL`/`AUX`/`PRN`/`COM1-9`/`LPT1-9`。
 
+### 5.4b custom payload 长度边界与包处理线程（阶段 4 必读）
+
+完整证据在 `docs/platform-probes.md` 的「Custom payload 长度边界与包处理线程」。三条结论：
+
+1. **`Packet250CustomPayload` 收发侧比较符不对称。** 构造器 `if_icmple 32767`（允许等于），`readPacketData` `if_icmpge 32767`（拒绝等于）。恰好 32767 字节能发出去，但对端跳过 `readFully`、`data` 留 null，**静默丢整个包体**。可用上限是 **32766**。`length` 由有符号 `readShort()` 读取，失败分支不消费声明字节数，所以接收侧必须先判 `data == null` 显式拒绝，否则声明 `length` 为 0/负数/≥32767 即可触发 NPE。
+2. **服务端包处理本就在主线程**（`MinecraftServer` tick → `NetworkListenThread.networkTick()` → `NetServerHandler.networkTick()` → `processReadPackets()` → `handleCustomPayload` → RIC mixin → `Packet.apply`）。上游的 `scheduleServerTask` 是为 netty 网络线程准备的，MITE 上没有这个问题；`MinecraftServer` 也无 `callable`/`FutureTask`/queue 成员、不实现 `IThreadListener`。**不要新建服务端主线程队列。** 仍需确认客户端侧排空点与 RIC 是否自带线程切换。
+3. **上游分片无 transfer ID。** `PacketAssembly.java:35` 的 `bufSize = 20480`，容器只有 `size`/`index`/`end`/`data` 四字段；服务端按玩家单槽、客户端仅一个全局缓冲，登录连发 8 类包时交错即静默串包。
+
 ### 5.5 编译期成功不等于运行时可用（已踩一次）
 
 **这是一整类风险，不是单个 bug。** 完整证据在 `docs/platform-probes.md` 的「依赖运行时可用性」。
@@ -372,6 +416,8 @@ MITE 的 `ChatAllowedCharacters.allowedCharacters` 是 **`String`**，内容来�
 | `api/questing/IQuest.java` | `RequirementType` 去掉 `PresetIcon`，`getTranslationKey()` 返回原始 key | 图标属客户端阶段 5。ordinal 与 byte id 保持不变以维持存档格式。上游 lang key 的拼写错误 `visbility` 也保留。 |
 | `core/storage/AtomicFileStorage.java` | 写入**同步**完成，`writeAndSync` 额外做 `getFD().sync()` | 上游走 `BQThreadedIO.DISK_IO`（4 线程池）异步写且不 fsync。移植端先同步以保证 server stop 不丢数据。若后续为主线程性能引入异步队列，`WorldStorage.flush()` 必须 join 该队列，否则 stop 会静默丢数据。 |
 | `core/storage/AtomicFileStorage.java` | 备份仅在显式调用 `backup()` 时产生，名为带 UTC 时间戳的 `<file>.<ts>.bak` | 上游正常保存路径（`JsonHelper.WriteToFile2`）完全不备份，只在解析失败时写固定名 `malformed_<name>.json`、版本升级时写 `backup/<ver>/`。移植端保持正常写入不备份，以免每玩家每 autosave 周期堆积无上限副本；但备份名改为时间戳，避免覆盖历史证据。 |
+| `core/BetterQuestingConstants.java` | 探针 channel 用 3 参 `ResourceLocation(..., false)` 显式跳过资源校验 | 2 参构造器字节码 `iconst_1` 证明默认 `verify=true`，会把实例登记进 `resources_to_verify`；集成服务器每 20 tick 校验，而 channel 不是真实资源文件，故单人模式 HUD 会持续渲染红字。文本值不变，wire 兼容性不受影响。见 §5.1。 |
+| `core/identity/` 全体 | 映射快照与审计日志用纯文本自校验行，非 JSON | 上游没有身份映射与审计的对应物（1.7.10 有可验证的 Mojang UUID），故这是新增而非偏离。选纯文本是为规避 Gson 2.2.2 的 API 缺失面，见 §4.2c。 |
 | `core/storage/StoragePaths.java` | 非法路径抛 `IOException` 拒绝，不做字符替换 | 上游 `JsonHelper.makeFileNameSafe` 把非法字符替换成 `_`，静默改名。存储边界宁可拒绝也不静默改写玩家进度文件名。另额外拒绝 Windows 保留设备名，上游禁用集不含这些，见 §5.4。 |
 
 ### 关于 `UuidDatabase` 的 `Map` 契约不对称
