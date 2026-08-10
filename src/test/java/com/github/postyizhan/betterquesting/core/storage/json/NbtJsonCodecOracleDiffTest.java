@@ -4,15 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import com.github.postyizhan.betterquesting.api.util.NbtCompat;
 import com.google.gson.JsonObject;
 import com.google.gson.stream.JsonWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.List;
 import java.util.function.Supplier;
 import net.minecraft.NBTBase;
 import net.minecraft.NBTTagByte;
@@ -23,8 +20,6 @@ import net.minecraft.NBTTagFloat;
 import net.minecraft.NBTTagInt;
 import net.minecraft.NBTTagIntArray;
 import net.minecraft.NBTTagList;
-import net.minecraft.NBTTagLong;
-import net.minecraft.NBTTagShort;
 import net.minecraft.NBTTagString;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -289,117 +284,16 @@ class NbtJsonCodecOracleDiffTest {
     }
 
     /**
-     * Renders JSON with object members sorted by key and every primitive kept as its literal text,
-     * so two documents that differ only in member order compare equal and nothing else does.
-     *
-     * <p>Comparing parsed trees with {@code JsonObject.equals} would be wrong here:
-     * {@code JsonPrimitive.equals} compares numbers through {@code doubleValue()}, and a float tag's
-     * text re-parsed as a double is a different double than the widened float
-     * ({@code 0.1} parses to {@code 0.1} but {@code (double) 0.1f} is {@code 0.10000000149011612}).
-     * That would report a divergence where both sides in fact wrote identical bytes. Primitives are
-     * therefore rendered with {@code toString()}, which for a parsed number returns the original
-     * literal.
+     * Order-insensitive JSON render; delegates to the shared {@link NbtCanonical#json} so the golden
+     * fixture suite and this inline suite agree on what "equal" means. See that class for why
+     * {@code JsonObject.equals} would be wrong here.
      */
     private static String canonicalJson(com.google.gson.JsonElement element) {
-        if (element.isJsonObject()) {
-            java.util.TreeMap<String, com.google.gson.JsonElement> sorted = new java.util.TreeMap<>();
-            for (java.util.Map.Entry<String, com.google.gson.JsonElement> member
-                : element.getAsJsonObject().entrySet()) {
-                sorted.put(member.getKey(), member.getValue());
-            }
-            StringBuilder rendered = new StringBuilder("{");
-            boolean first = true;
-            for (java.util.Map.Entry<String, com.google.gson.JsonElement> member : sorted.entrySet()) {
-                if (!first) {
-                    rendered.append(',');
-                }
-                first = false;
-                rendered.append('[').append(member.getKey()).append("]=").append(canonicalJson(member.getValue()));
-            }
-            return rendered.append('}').toString();
-        }
-        if (element.isJsonArray()) {
-            StringBuilder rendered = new StringBuilder("[");
-            boolean first = true;
-            for (com.google.gson.JsonElement child : element.getAsJsonArray()) {
-                if (!first) {
-                    rendered.append(',');
-                }
-                first = false;
-                rendered.append(canonicalJson(child));
-            }
-            return rendered.append(']').toString();
-        }
-        return element.toString();
+        return NbtCanonical.json(element);
     }
 
-    /**
-     * Renders NBT as text that exposes every property the JSON contract carries: tag ids, structure,
-     * element order inside lists, and the exact value of each primitive.
-     *
-     * <p>Compound keys are sorted because a compound is a {@code HashMap} whose iteration order is
-     * not part of the contract; list elements keep their order because that order <em>is</em> part of
-     * it. Tag names are excluded: {@code setTag} derives a child's name from its key
-     * (verified against MITE's bytecode), and list element names are never encoded in JSON at all, so
-     * a name difference cannot reach a file.
-     */
+    /** Structure-and-value NBT render; delegates to the shared {@link NbtCanonical#nbt}. */
     private static String canon(NBTBase tag) {
-        if (tag == null) {
-            return "null";
-        }
-        switch (tag.getId()) {
-            case 0:
-                return "end";
-            case 1:
-                return "byte(" + ((NBTTagByte) tag).data + ")";
-            case 2:
-                return "short(" + ((NBTTagShort) tag).data + ")";
-            case 3:
-                return "int(" + ((NBTTagInt) tag).data + ")";
-            case 4:
-                return "long(" + ((NBTTagLong) tag).data + ")";
-            case 5:
-                // Float.toString keeps -0.0 distinct from 0.0 and never widens through double.
-                return "float(" + Float.toString(((NBTTagFloat) tag).data) + ")";
-            case 6:
-                return "double(" + Double.toString(((NBTTagDouble) tag).data) + ")";
-            case 7:
-                return "bytes" + Arrays.toString(((NBTTagByteArray) tag).byteArray);
-            case 8:
-                return "string(" + ((NBTTagString) tag).data + ")";
-            case 9:
-                return canonList((NBTTagList) tag);
-            case 10:
-                return canonCompound((NBTTagCompound) tag);
-            case 11:
-                return "ints" + Arrays.toString(((NBTTagIntArray) tag).intArray);
-            default:
-                return "unknown(" + tag.getId() + ")";
-        }
-    }
-
-    private static String canonList(NBTTagList list) {
-        StringBuilder rendered = new StringBuilder("list[");
-        List<NBTBase> elements = NbtCompat.elements(list);
-        for (int index = 0; index < elements.size(); index++) {
-            if (index > 0) {
-                rendered.append(',');
-            }
-            rendered.append(index).append('=').append(canon(elements.get(index)));
-        }
-        return rendered.append(']').toString();
-    }
-
-    private static String canonCompound(NBTTagCompound compound) {
-        StringBuilder rendered = new StringBuilder("compound{");
-        boolean first = true;
-        for (String key : NbtCompat.sortedKeys(compound)) {
-            if (!first) {
-                rendered.append(',');
-            }
-            first = false;
-            rendered.append('[').append(key).append("]=").append(canon(compound.getTag(key)));
-        }
-        return rendered.append('}').toString();
+        return NbtCanonical.nbt(tag);
     }
 }

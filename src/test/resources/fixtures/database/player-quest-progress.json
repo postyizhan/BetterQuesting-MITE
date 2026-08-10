@@ -1,0 +1,22 @@
+{
+	"questProgress:9": {
+		"0:10": {
+			"completed:9": {
+				"0:10": {
+					"timestamp:4": 1700000000000,
+					"uuid:8": "d4f5a6b7-1122-3344-5566-778899aabbcc"
+				}
+			},
+			"questIDHigh:4": 100,
+			"questIDLow:4": 200,
+			"tasks:9": {
+				"0:10": {
+					"completeUsers:9": {
+						"0:8": "d4f5a6b7-1122-3344-5566-778899aabbcc"
+					},
+					"index:3": 0
+				}
+			}
+		}
+	}
+}

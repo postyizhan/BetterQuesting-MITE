@@ -1,0 +1,77 @@
+{
+	"questLines:9": {
+		"0:10": {
+			"order:3": 0,
+			"properties:10": {
+				"betterquesting:10": {
+					"name:8": "Long Line"
+				}
+			},
+			"questLineIDHigh:4": 0,
+			"questLineIDLow:4": 700,
+			"quests:9": {
+				"0:10": {
+					"questIDHigh:4": 0,
+					"questIDLow:4": 1000,
+					"x:3": 0
+				},
+				"1:10": {
+					"questIDHigh:4": 1,
+					"questIDLow:4": 1000,
+					"x:3": 48
+				},
+				"2:10": {
+					"questIDHigh:4": 2,
+					"questIDLow:4": 1000,
+					"x:3": 96
+				},
+				"3:10": {
+					"questIDHigh:4": 3,
+					"questIDLow:4": 1000,
+					"x:3": 144
+				},
+				"4:10": {
+					"questIDHigh:4": 4,
+					"questIDLow:4": 1000,
+					"x:3": 192
+				},
+				"5:10": {
+					"questIDHigh:4": 5,
+					"questIDLow:4": 1000,
+					"x:3": 240
+				},
+				"6:10": {
+					"questIDHigh:4": 6,
+					"questIDLow:4": 1000,
+					"x:3": 288
+				},
+				"7:10": {
+					"questIDHigh:4": 7,
+					"questIDLow:4": 1000,
+					"x:3": 336
+				},
+				"8:10": {
+					"questIDHigh:4": 8,
+					"questIDLow:4": 1000,
+					"x:3": 384
+				},
+				"9:10": {
+					"questIDHigh:4": 9,
+					"questIDLow:4": 1000,
+					"x:3": 432
+				},
+				"10:10": {
+					"questIDHigh:4": 10,
+					"questIDLow:4": 1000,
+					"x:3": 480
+				},
+				"11:10": {
+					"questIDHigh:4": 11,
+					"questIDLow:4": 1000,
+					"x:3": 528
+				}
+			}
+		}
+	}
+}
+

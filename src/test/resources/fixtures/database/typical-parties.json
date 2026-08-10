@@ -1,0 +1,22 @@
+{
+	"parties:9": {
+		"0:10": {
+			"members:9": {
+				"0:10": {
+					"status:8": "OWNER",
+					"uuid:8": "d4f5a6b7-1122-3344-5566-778899aabbcc"
+				},
+				"1:10": {
+					"status:8": "MEMBER",
+					"uuid:8": "11223344-5566-7788-99aa-bbccddeeff00"
+				}
+			},
+			"partyID:3": 0,
+			"properties:10": {
+				"betterquesting:10": {
+					"name:8": "The Explorers"
+				}
+			}
+		}
+	}
+}

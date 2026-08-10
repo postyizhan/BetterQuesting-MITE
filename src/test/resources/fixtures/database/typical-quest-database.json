@@ -1,0 +1,176 @@
+{
+	"build:8": "1.6.4-1.0.0",
+	"format:8": "3.1.0",
+	"mitePortFormat:8": "1",
+	"questDatabase:9": {
+		"0:10": {
+			"preRequisites:9": {},
+			"properties:10": {
+				"betterquesting:10": {
+					"autoClaim:1": 0,
+					"countAsQuest:1": 1,
+					"desc:8": "Break some stone to begin.",
+					"isMain:1": 0,
+					"name:8": "First Steps",
+					"questLogic:8": "AND",
+					"taskLogic:8": "AND",
+					"visibility:8": "NORMAL"
+				}
+			},
+			"questIDHigh:4": 100,
+			"questIDLow:4": 200,
+			"rewards:9": {
+				"0:10": {
+					"amount:3": 100,
+					"index:3": 0,
+					"isLevels:1": 0,
+					"rewardID:8": "bq_standard:xp"
+				}
+			},
+			"tasks:9": {
+				"0:10": {
+					"index:3": 0,
+					"taskID:8": "bq_standard:checkbox"
+				}
+			}
+		},
+		"1:10": {
+			"preRequisites:9": {
+				"0:10": {
+					"questIDHigh:4": 100,
+					"questIDLow:4": 200,
+					"type:1": 2
+				}
+			},
+			"properties:10": {
+				"betterquesting:10": {
+					"autoClaim:1": 1,
+					"countAsQuest:1": 1,
+					"desc:8": "A hidden follow-up quest.",
+					"isMain:1": 0,
+					"name:8": "Hidden Path",
+					"questLogic:8": "AND",
+					"taskLogic:8": "OR",
+					"visibility:8": "HIDDEN"
+				}
+			},
+			"questIDHigh:4": 101,
+			"questIDLow:4": 201,
+			"rewards:9": {},
+			"tasks:9": {
+				"0:10": {
+					"index:3": 0,
+					"requiredItems:9": {
+						"0:10": {
+							"Count:3": 1,
+							"Damage:2": 0,
+							"OreDict:8": "",
+							"id:8": "minecraft:diamond",
+							"tag:10": {
+								"display:10": {
+									"Name:8": "Shiny Diamond"
+								},
+								"somemod:charge:3": 42
+							}
+						}
+					},
+					"taskID:8": "bq_standard:retrieval"
+				}
+			}
+		},
+		"2:10": {
+			"preRequisites:9": {
+				"0:10": {
+					"questIDHigh:4": 100,
+					"questIDLow:4": 200
+				},
+				"1:10": {
+					"questIDHigh:4": 101,
+					"questIDLow:4": 201,
+					"type:1": 1
+				}
+			},
+			"properties:10": {
+				"betterquesting:10": {
+					"autoClaim:1": 0,
+					"countAsQuest:1": 1,
+					"desc:8": "Requires both prior quests.",
+					"isMain:1": 1,
+					"name:8": "The Convergence",
+					"questLogic:8": "AND",
+					"taskLogic:8": "AND",
+					"visibility:8": "NORMAL"
+				}
+			},
+			"questIDHigh:4": 102,
+			"questIDLow:4": 202,
+			"rewards:9": {},
+			"tasks:9": {}
+		}
+	},
+	"questLines:9": {
+		"0:10": {
+			"order:3": 0,
+			"properties:10": {
+				"betterquesting:10": {
+					"desc:8": "The starting line.",
+					"name:8": "Overworld"
+				}
+			},
+			"questLineIDHigh:4": 0,
+			"questLineIDLow:4": 500,
+			"quests:9": {
+				"0:10": {
+					"questIDHigh:4": 100,
+					"questIDLow:4": 200,
+					"sizeX:3": 24,
+					"sizeY:3": 24,
+					"x:3": 0,
+					"y:3": 0
+				},
+				"1:10": {
+					"questIDHigh:4": 101,
+					"questIDLow:4": 201,
+					"sizeX:3": 24,
+					"sizeY:3": 24,
+					"x:3": 48,
+					"y:3": 0
+				}
+			}
+		},
+		"1:10": {
+			"order:3": 1,
+			"properties:10": {
+				"betterquesting:10": {
+					"desc:8": "The advanced line.",
+					"name:8": "Nether"
+				}
+			},
+			"questLineIDHigh:4": 0,
+			"questLineIDLow:4": 501,
+			"quests:9": {
+				"0:10": {
+					"questIDHigh:4": 102,
+					"questIDLow:4": 202,
+					"sizeX:3": 24,
+					"sizeY:3": 24,
+					"x:3": 0,
+					"y:3": 0
+				}
+			}
+		}
+	},
+	"questSettings:10": {
+		"betterquesting:10": {
+			"editMode:1": 0,
+			"hardcore:1": 0,
+			"home_anchor_x:5": 0.5,
+			"livesDef:3": 3,
+			"livesMax:3": 10,
+			"pack_name:8": "Sample Pack",
+			"pack_version:3": 2,
+			"party_enable:1": 1
+		}
+	}
+}
+
