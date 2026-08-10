@@ -7,3 +7,7 @@
 # These are Windows script files and should use crlf
 *.bat           text eol=crlf
 
+# Corruption fixtures are byte-exact by design: they carry NUL padding, a UTF-8 BOM, zero length
+# and deliberate truncation, and core.autocrlf must not rewrite any of it on checkout.
+src/test/resources/fixtures/** -text
+
