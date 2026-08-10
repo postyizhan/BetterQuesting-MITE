@@ -296,6 +296,7 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 
 - `format=true`：compound 每个 key 编码为 `"<key>:<tagId>"`（`:272`），key 先经 `TreeSet` 排序（`:267`）；**list 不再是数组而是对象**，元素 key 为 `"<index>:<tagId>"`（`:221-225`）。
 - **上游有两套写侧，格式基准取哪套要分清**：`JsonObject` 版（`:202/:262`，带 `:267` 的 TreeSet 排序）只被 `/bq_admin default` 导出命令（`QuestCommandDefaults.java:208/255/272/320/343`）和 `bq_standard` loot（`LootSaveLoad.java:47`）使用；**真实存档写侧走的是流式 `JsonWriter` 版**（`:139/:182`），`SaveLoadHandler.java:314/341/349/357/369` 写 QuestDatabase/Parties/NameCache/Lives 全部经它，而它在 `:185` 直接遍历 `func_150296_c()` **不排序**。故"TreeSet 排序是存档格式约定"是错的，排序只是导出命令的行为；我们两条路径都排序属 §4.2d 记录的有意偏离，因 JSON 成员顺序无语义、上游读侧 `:289` 按 `entrySet()` 遍历且 `setTag(key,…)` 与顺序无关。
+- **上游真实存档的 compound 键序不只是"未排序"，而是不确定**（javap 核实，非推测）：`NBTTagCompound.tagMap` 声明类型为 `java.util.Map`，但两个构造器均 `new java/util/HashMap`，故 `func_150296_c()` = `tagMap.keySet()` 是 hash 序。推论有两条硬约束：(a) **多 key compound 不存在字节级上游基准**，任何断言精确序列化字符串的测试只在验证我方约定，不构成上游兼容性证据，不得如此宣称；(b) 差分/预言机测试比对 compound 必须按解析后结构比，比字符串会假失败。我方 TreeSet 排序因此不是引入分歧，而是把本就无契约的顺序收紧为确定值。
 - **list 索引数字被读侧丢弃，顺序靠成员次序承载**（继承上游缺陷，非我方引入）：两侧读 list 都只解析 id 后缀、按 `entrySet()` 出现顺序 `appendTag`（上游 `:377-389`，我方 `NbtJsonCodec.java:352-365`），不看索引数字。写侧按自然循环序 `0,1,2…` 输出、Gson 保序，故自产文件正确；但 ≥10 元素的 list 一旦被外部工具按字典序重排 key（`"10:4"` 排到 `"1:4"` 与 `"2:4"` 之间），元素会**静默乱序且无任何报错**。改为按索引数字排序会在上游自己能读的文件上与上游分歧，故保持原样，风险由 `NbtJsonCodecTest` 的 `listIndicesPastNineKeepNaturalOrderNotLexicographicOrder` 与 `lexicographicallyReorderedListKeysSilentlyPermuteElements` 两例钉住。
 - `format=false`：裸 key（`:274`）、普通数组（`:230-238`），类型信息丢失。
 - 数值 tag（id 1..6）一律 `JsonPrimitive`（`:207-209`）；`NBTTagByteArray`/`NBTTagIntArray` **无论 format 都是普通数组**（`:240-255`），类型只能靠外层后缀恢复。
@@ -305,7 +306,17 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 
 #### 平台差异
 
-上游 `:267` 用 `func_150296_c()` 取 key 集合，**MITE 的 `NBTTagCompound` 没有任何 key-set 方法**，只有返回裸 `Collection` 的 `getTags()`（`tagMap.values()` 活视图）。MITE 上枚举 key 的唯一路径是遍历 `getTags()` 再对每个 `NBTBase` 调 `getName()`（已 javap 核实为 `public final String`）。上游 `:409`、`:518-531` 反射访问 `NBTTagList.tagList`，MITE 有 public `tagCount()`/`tagAt(int)` 可直接用。
+上游 `:267` 用 `func_150296_c()` 取 key 集合，**MITE 的 `NBTTagCompound` 没有任何 key-set 方法**，只有返回裸 `Collection` 的 `getTags()`（`tagMap.values()` 活视图）。MITE 上枚举 key 的唯一路径是遍历 `getTags()` 再对每个 `NBTBase` 调 `getName()`（已 javap 核实为 `public final String`）。上游 `:409`、`:518-531` 反射访问 `NBTTagList.tagList`，MITE 有 public `tagCount()`/`tagAt(int)` 可直接用（javap 核实 `tagList` 为 private `java.util.List`，构造器 `new ArrayList`；无参构造器置 id=9、name=`""`；`setTag` 先调 `NBTBase.setName(key)` 再 `Map.put`）。
+
+**javap 探针只能打重映射后的 loom 中间 jar**，路径：
+
+```
+~/.gradle/caches/fml-loom/minecraftMaven/net/minecraft/minecraft-merged-empty-intermediate/
+  1.6.4-MITE-loom.mappings.1_6_4_MITE.layered+hash.1614893260-v2/
+  minecraft-merged-empty-intermediate-…-v2.jar
+```
+
+打原始 `1.6.4-MITE.jar` 或 `minecraft-merged.jar` 会得到空输出：原始 jar 是**混淆**的（7208 个 `a.class`/`aa.class` 形态的条目），按名字 grep 或 javap 全部零命中，而**零命中不构成"MITE 没有该能力"的证据**——这个坑已踩过两次（`NBTTagCompound`、`fluid`）。
 
 #### `format` / `build` 上游语义（已由主代理独立核实）
 
