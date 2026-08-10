@@ -111,7 +111,7 @@
 
 ## 3. 当前状态
 
-最近一次构建与测试基线（提交 `b38c549`）：**33 个测试类、334 个测试**全绿（0 failure、0 error、0 skipped）。数字取自 `build/test-results/test/*.xml` 汇总，**不要用 Gradle 退出码或 `BUILD SUCCESSFUL` 当证据**——本项目已出现过全部 task `UP-TO-DATE` 的缓存命中，那种"成功"对当前代码状态零信息量；跑验证时加 `--rerun-tasks`。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
+最近一次构建与测试基线（提交 `8de696c`）：**34 个测试类、485 个测试**全绿（0 failure、0 error、0 skipped）。数字取自 `build/test-results/test/*.xml` 汇总，**不要用 Gradle 退出码或 `BUILD SUCCESSFUL` 当证据**——本项目已出现过全部 task `UP-TO-DATE` 的缓存命中，那种"成功"对当前代码状态零信息量；跑验证时加 `--rerun-tasks`。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
 
 ### 已完成
 
@@ -318,15 +318,13 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 
 打原始 `1.6.4-MITE.jar` 或 `minecraft-merged.jar` 会得到空输出：原始 jar 是**混淆**的（7208 个 `a.class`/`aa.class` 形态的条目），按名字 grep 或 javap 全部零命中，而**零命中不构成"MITE 没有该能力"的证据**——这个坑已踩过两次（`NBTTagCompound`、`fluid`）。
 
-#### `fallbackTagId` 数组扫描缺失是不安全偏离（待修）
+#### `fallbackTagId` 不复刻数组扫描是**安全**的（上游该扫描是死代码）
 
-上游 `:454-535` 的 `fallbackTagID` 对 `JsonArray` 会扫全部元素定类型：全能落 byte → `7`，全能落 int → `11`，否则 `9`。我方 `NbtJsonCodec.fallbackTagId` 直接 `return TAG_LIST`。
+上游 `:474-508` 的 `fallbackTagID` 看似对 `JsonArray` 扫元素定类型（全落 byte → `7`，全落 int → `11`，否则 `9`），但 **`:510` 的 `tagID = 9;` 位于循环闭合（`:508`）之后、`isJsonArray()` 分支之内，无条件执行**，把扫描结果全部覆盖。故上游所有 `JsonArray` 一律解析为 tagID `9`，那 30 行扫描是死代码。我方 `NbtJsonCodec.fallbackTagId` 直接 `return TAG_LIST` 与之逐位等价，属安全偏离（省掉死代码），非行为分歧。
 
-**先前登记为"有意偏离"但没论证安全性，实际不安全。** 后果不止 tag 类型不同：无后缀整数数组上游得 `NBTTagIntArray`，我方得 `NBTTagList`，调用方 `getIntArray(key)` 拿到 list 会返回空数组，**静默丢数据且无诊断**。
+**不要"修"它。** 复刻扫描会让我方在上游产出 `NBTTagList` 的地方产出 `NBTTagByteArray`/`NBTTagIntArray`，反而制造真分歧。曾有一轮误判此处为"静默丢数据的不安全偏离"（commit `5f9026a`），错因是只读 `:454-470` 与尾部片段、把 `:510` 当成空数组分支；`NbtJsonCodecOracleDiffTest` 的差分已证明两侧此路径一致。
 
-可达性已核实（非仅 `format=false` 死路）：上游全仓 **23 个调用点（11 个 `JSONtoNBT_*` + 12 个 `NBTtoJSON_*`）一律传 `format=true`**，无任何 `format=false` 调用者，故 plain 方言在上游是死代码（这也解释了 `:167-171` 缺 `endArray()` 为何能潜伏）。但 `format=true` 下 `fallbackTagId` 仍可达——经 `:305-312` 后缀解析失败落回 `id=0` 的分支，即手改过或被外部工具写坏 key 的档。上游写出的真档不会触发，手改档会。
-
-修法：复刻上游扫描（含它 `getAsLong() != getAsInt()` 的溢出检查与嵌套 catch 顺序），使该路径与上游逐字节一致。空数组上游走到 `:478` 后落 `tagID = 9`，须一并对齐。
+可达性（顺带核实，结论仍有效）：上游全仓 **23 个调用点（11 个 `JSONtoNBT_*` + 12 个 `NBTtoJSON_*`）一律传 `format=true`**，无任何 `format=false` 调用者，故 plain 方言在上游是死代码——这解释了 `:167-171` 缺 `endArray()` 为何能潜伏至今。`fallbackTagId` 在 `format=true` 下仍可达（经 `:305-312` 后缀解析失败落回 `id=0`，即手改档）。
 
 #### `format` / `build` 上游语义（已由主代理独立核实）
 
@@ -488,7 +486,7 @@ MITE 的 `ChatAllowedCharacters.allowedCharacters` 是 **`String`**，内容来�
 | `core/storage/AtomicFileStorage.java` | 写入**同步**完成，`writeAndSync` 额外做 `getFD().sync()` | 上游走 `BQThreadedIO.DISK_IO`（4 线程池）异步写且不 fsync。移植端先同步以保证 server stop 不丢数据。若后续为主线程性能引入异步队列，`WorldStorage.flush()` 必须 join 该队列，否则 stop 会静默丢数据。 |
 | `core/storage/AtomicFileStorage.java` | 备份仅在显式调用 `backup()` 时产生，名为带 UTC 时间戳的 `<file>.<ts>.bak` | 上游正常保存路径（`JsonHelper.WriteToFile2`）完全不备份，只在解析失败时写固定名 `malformed_<name>.json`、版本升级时写 `backup/<ver>/`。移植端保持正常写入不备份，以免每玩家每 autosave 周期堆积无上限副本；但备份名改为时间戳，避免覆盖历史证据。 |
 | `core/BetterQuestingConstants.java` | 探针 channel 用 3 参 `ResourceLocation(..., false)` 显式跳过资源校验 | 2 参构造器字节码 `iconst_1` 证明默认 `verify=true`，会把实例登记进 `resources_to_verify`；集成服务器每 20 tick 校验，而 channel 不是真实资源文件，故单人模式 HUD 会持续渲染红字。文本值不变，wire 兼容性不受影响。见 §5.1。 |
-| `core/storage/json/NbtJsonCodec.java` | streaming 路径也排序 key；plain 模式 list 补 `endArray()`；**`fallbackTagId` 不复刻数组扫描（已判定为不安全偏离，待修，见下）**；null 载荷降级为空值 | 详见 §4.2d「有意偏离上游」。其中 `endArray()` 是修上游真缺陷（`NBTConverter.java:166-171` 会让其后每个 tag 错位，因唯一 streaming 调用方传 `format=true` 而潜伏）。 |
+| `core/storage/json/NbtJsonCodec.java` | streaming 路径也排序 key；plain 模式 list 补 `endArray()`；`fallbackTagId` 不复刻数组扫描（**安全**：上游该扫描被 `:510` 无条件覆盖，是死代码，勿"修"，见 §4.2d 同名小节）；null 载荷降级为空值 | 详见 §4.2d「有意偏离上游」。其中 `endArray()` 是修上游真缺陷（`NBTConverter.java:166-171` 会让其后每个 tag 错位，因唯一 streaming 调用方传 `format=true` 而潜伏）。 |
 | `core/storage/json/JsonDocuments.java` | 非 object 文档抛异常拒绝，不静默返回空 | 上游 `fromJson` 对空文件返回 null 并让调用方走默认值，会让截断的数据库在下次保存时被空库替换。 |
 | `core/identity/` 全体 | 映射快照与审计日志用纯文本自校验行，非 JSON | 上游没有身份映射与审计的对应物（1.7.10 有可验证的 Mojang UUID），故这是新增而非偏离。选纯文本是为规避 Gson 2.2.2 的 API 缺失面，见 §4.2c。 |
 | `core/storage/StoragePaths.java` | 非法路径抛 `IOException` 拒绝，不做字符替换 | 上游 `JsonHelper.makeFileNameSafe` 把非法字符替换成 `_`，静默改名。存储边界宁可拒绝也不静默改写玩家进度文件名。另额外拒绝 Windows 保留设备名，上游禁用集不含这些，见 §5.4。 |
