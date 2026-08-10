@@ -295,6 +295,8 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 #### 上游类型标记约定（存档兼容基准，证据 `NBTConverter.java:202-319`）
 
 - `format=true`：compound 每个 key 编码为 `"<key>:<tagId>"`（`:272`），key 先经 `TreeSet` 排序（`:267`）；**list 不再是数组而是对象**，元素 key 为 `"<index>:<tagId>"`（`:221-225`）。
+- **上游有两套写侧，格式基准取哪套要分清**：`JsonObject` 版（`:202/:262`，带 `:267` 的 TreeSet 排序）只被 `/bq_admin default` 导出命令（`QuestCommandDefaults.java:208/255/272/320/343`）和 `bq_standard` loot（`LootSaveLoad.java:47`）使用；**真实存档写侧走的是流式 `JsonWriter` 版**（`:139/:182`），`SaveLoadHandler.java:314/341/349/357/369` 写 QuestDatabase/Parties/NameCache/Lives 全部经它，而它在 `:185` 直接遍历 `func_150296_c()` **不排序**。故"TreeSet 排序是存档格式约定"是错的，排序只是导出命令的行为；我们两条路径都排序属 §4.2d 记录的有意偏离，因 JSON 成员顺序无语义、上游读侧 `:289` 按 `entrySet()` 遍历且 `setTag(key,…)` 与顺序无关。
+- **list 索引数字被读侧丢弃，顺序靠成员次序承载**（继承上游缺陷，非我方引入）：两侧读 list 都只解析 id 后缀、按 `entrySet()` 出现顺序 `appendTag`（上游 `:377-389`，我方 `NbtJsonCodec.java:352-365`），不看索引数字。写侧按自然循环序 `0,1,2…` 输出、Gson 保序，故自产文件正确；但 ≥10 元素的 list 一旦被外部工具按字典序重排 key（`"10:4"` 排到 `"1:4"` 与 `"2:4"` 之间），元素会**静默乱序且无任何报错**。改为按索引数字排序会在上游自己能读的文件上与上游分歧，故保持原样，风险由 `NbtJsonCodecTest` 的 `listIndicesPastNineKeepNaturalOrderNotLexicographicOrder` 与 `lexicographicallyReorderedListKeysSilentlyPermuteElements` 两例钉住。
 - `format=false`：裸 key（`:274`）、普通数组（`:230-238`），类型信息丢失。
 - 数值 tag（id 1..6）一律 `JsonPrimitive`（`:207-209`）；`NBTTagByteArray`/`NBTTagIntArray` **无论 format 都是普通数组**（`:240-255`），类型只能靠外层后缀恢复。
 - null 或不识别类型返回空 `JsonObject`（`:203-205`、`:256-258`）。

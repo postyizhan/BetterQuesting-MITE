@@ -504,6 +504,43 @@ class NbtJsonCodecTest {
         return bytes.toString(StandardCharsets.UTF_8);
     }
 
+    @Test
+    void listIndicesPastNineKeepNaturalOrderNotLexicographicOrder() {
+        NBTTagCompound root = new NBTTagCompound();
+        NBTTagList list = new NBTTagList("");
+        for (int i = 0; i < 12; i++) {
+            list.appendTag(new NBTTagLong("", i));
+        }
+        root.setTag("entries", list);
+
+        String encoded = codec.toJson(root, true).toString();
+        // Upstream keys list entries by loop counter (NBTConverter.java:220-225) and Gson keeps
+        // insertion order, so "10:4" follows "9:4" rather than sorting between "1:4" and "2:4".
+        assertTrue(encoded.contains("\"9:4\":9,\"10:4\":10,\"11:4\":11}"), encoded);
+
+        NBTTagCompound restored = codec.toNbt(codec.toJson(root, true), true);
+        assertEquals(List.of(0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L),
+            longsOf((NBTTagList) restored.getTag("entries")));
+    }
+
+    @Test
+    void lexicographicallyReorderedListKeysSilentlyPermuteElements() throws IOException {
+        // Characterization of an inherited upstream defect, NOT endorsed behaviour: the reader
+        // (NbtJsonCodec.java:352-365, upstream NBTConverter.java:377-389) parses only the element-id
+        // suffix and appends in entry order, discarding the index. Any external tool that sorts the
+        // object's keys therefore permutes the list with no error surfaced. Honouring the index
+        // instead would diverge from upstream on files upstream itself accepts, so the format stays
+        // as-is and the hazard is pinned here.
+        JsonObject sortedByText = JsonDocuments.parseObject(
+            "{\"entries:9\":{\"0:4\":0,\"1:4\":1,\"10:4\":10,\"11:4\":11,\"2:4\":2,\"3:4\":3,"
+                + "\"4:4\":4,\"5:4\":5,\"6:4\":6,\"7:4\":7,\"8:4\":8,\"9:4\":9}}");
+
+        NBTTagCompound restored = codec.toNbt(sortedByText, true);
+
+        assertEquals(List.of(0L, 1L, 10L, 11L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L),
+            longsOf((NBTTagList) restored.getTag("entries")));
+    }
+
     private String indented(NBTTagCompound source, boolean format) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         JsonWriter json = JsonDocuments.writer(bytes);
