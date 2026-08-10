@@ -2,7 +2,7 @@
 
 本文写给接手本项目的下一个会话。目标是让你在不重读全部上游源码的前提下，知道现在到哪了、哪些结论已经被字节码证实、哪些坑已经踩过。
 
-读完本文后，按顺序再读 `plan.md`（总体移植计划）和 `docs/platform-probes.md`（平台事实与 blocker）。`docs/source-migration-ledger.md` 是上游源码台账，需要排期时再查。
+读完本文后，按顺序再读 `plan.md`（总体移植计划，**在仓库根目录，不在 `docs/` 下**——本文其余各处提到的 `plan.md` 同理，曾有会话按 `docs/plan.md` 查找未果而误判该文件不存在）和 `docs/platform-probes.md`（平台事实与 blocker）。阶段划分与验收标准以 `plan.md` 为准，本文只记执行状态；两者冲突时以 `plan.md` 为权威并回头修本文。`docs/source-migration-ledger.md` 是上游源码台账，需要排期时再查。
 
 ## 当前真实基线
 
@@ -111,7 +111,7 @@
 
 ## 3. 当前状态
 
-最近一次构建与测试基线：`./gradlew clean build --console=plain` 通过，**31 个测试类、292 个测试**全绿（0 failure、0 error、0 skipped）。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
+最近一次构建与测试基线（提交 `b38c549`）：**33 个测试类、334 个测试**全绿（0 failure、0 error、0 skipped）。数字取自 `build/test-results/test/*.xml` 汇总，**不要用 Gradle 退出码或 `BUILD SUCCESSFUL` 当证据**——本项目已出现过全部 task `UP-TO-DATE` 的缓存命中，那种"成功"对当前代码状态零信息量；跑验证时加 `--rerun-tasks`。身份层基线见 §4.1，存储层基线见 §4.2 与 §4.2b，依赖运行时可用性见 §5.5。
 
 ### 已完成
 
@@ -338,7 +338,11 @@ streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无
 2. ~~持久化身份映射并建立追加审计；迁移报告必须记录身份来源和管理员决定。~~ 已完成，见 §4.2c。
 3. 序列化层与字段语义已完成，见 §4.2d；剩余部分是把 codec 接到各数据库的读写路径（批次 B4）。
 4. ~~实现原子文件写入与带时间戳备份。~~ 已完成，但备份改为显式调用而非每次写入隐式生成（对齐上游，见 §4.2 H1）。替换前的 readback 校验已于 §4.2d 补齐。
-5. 建立 JSON/NBT golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度、损坏/截断/超大文件。
+5. 建立 JSON/NBT golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度/**流体**、损坏/截断/超大文件。损坏/截断一类已完成（`a705c49`，18 个 malformed + 2 个 lenient fixture，见 §4.2e），其余全部未做。**注意 `plan.md` 阶段 3 工作项 3 的原始清单含「流体」，此处此前漏记**，照本节派活会少交一类。
+
+流体一类不可跳过，已核实：上游存在 `bq_standard/tasks/TaskFluid.java`、`api/placeholders/FluidPlaceholder.java`、`api/questing/tasks/IFluidTask.java`，共 17 个文件引用 `FluidStack`/`FluidRegistry`，所以**真实上游存档里可能带流体任务数据**。序列化形状（`TaskFluid.java:70-81`）：`requiredFluids` 是 compound 列表，每项由 Forge `FluidStack.writeToNBT` 写出（`FluidName` 字符串 + `Amount` int + 可选 `Tag` compound），同层还有 `ignoreNBT`/`consume`/`groupDetect`/`autoConsume` 四个 boolean；进度侧 `data` 是 TAG_INT 列表（`:124`）。`FluidStack` 是 Forge 类型而 MITE 无 Forge，故阶段 3 对流体只能**不透明保留 + placeholder + 迁移报告**（对应 `plan.md` 工作项 9），不得静默替换成其他物品，语义解析留待后续阶段。
+
+**探针方法警告**：不要用 `unzip -l 1.6.4-MITE.jar | grep -i fluid` 之类按名字搜 jar 来判断平台是否支持某概念。该 jar 是**混淆**的（条目形如 `a.class`/`aa.class`/`aaa.class`，7208 个文件），任何可读类名都搜不到，零命中不构成"不存在"的证据。同样的坑先前在 `NBTTagCompound` 上踩过一次，见 §5.2 与记忆条目。
 6. 实现 `LegacyQuestImporter`；旧 `QuestProgress.json` 转换为逐玩家文件后必须保留原件。
 7. 周期 autosave、world save、server stop 均触发 flush；server stop 必须等待待处理 I/O 完成。
 8. 目标平台缺失物品、实体、维度等内容时生成 placeholder 和迁移报告，不得静默替换成其他内容。
