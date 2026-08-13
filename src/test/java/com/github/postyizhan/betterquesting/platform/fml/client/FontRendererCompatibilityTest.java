@@ -1,4 +1,4 @@
-package com.github.postyizhan.betterquesting.platform.fml.mixin;
+package com.github.postyizhan.betterquesting.platform.fml.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;

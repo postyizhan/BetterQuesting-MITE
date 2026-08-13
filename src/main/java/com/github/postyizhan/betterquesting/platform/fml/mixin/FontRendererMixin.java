@@ -1,5 +1,6 @@
 package com.github.postyizhan.betterquesting.platform.fml.mixin;
 
+import com.github.postyizhan.betterquesting.platform.fml.client.FontRendererCompatibility;
 import java.util.Random;
 import net.minecraft.FontRenderer;
 import org.spongepowered.asm.mixin.Mixin;
