@@ -1,0 +1,28 @@
+{
+	"questDatabase:9": {
+		"0:10": {
+			"properties:10": {
+				"betterquesting:10": {
+					"name:8": "Missing entity boundary"
+				}
+			},
+			"questIDHigh:4": 201,
+			"questIDLow:4": 301,
+			"rewards:9": {},
+			"tasks:9": {
+				"0:10": {
+					"damageType:8": "generic",
+					"ignoreNBT:1": 0,
+					"index:3": 0,
+					"required:3": 3,
+					"subtypes:1": 1,
+					"target:8": "missingmod:warden",
+					"targetNBT:10": {
+						"CustomName:8": "Unregistered target"
+					},
+					"taskID:8": "bq_standard:hunt"
+				}
+			}
+		}
+	}
+}

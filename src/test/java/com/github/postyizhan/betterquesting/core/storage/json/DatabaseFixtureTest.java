@@ -116,7 +116,11 @@ class DatabaseFixtureTest {
                 "empty-quest-database.json",
                 "empty-quest-line-database.json",
                 "empty-quest-settings.json",
+                "fluid-placeholder.json",
                 "legacy-quest-progress.json",
+                "missing-dimension.json",
+                "missing-entity.json",
+                "missing-item.json",
                 "player-quest-progress.json",
                 "quest-line-twelve-quests.json",
                 "typical-parties.json",
@@ -183,6 +187,49 @@ class DatabaseFixtureTest {
         assertTrue(line.hasKey("questLineIDHigh") && line.hasKey("questLineIDLow"),
             "quest lines must carry the High/Low id pair");
         assertFalse(line.hasKey("questLineID"), "a bare questLineID is not an upstream field");
+    }
+
+    @Test
+    void missingContentFixturesKeepSourceFieldsForMigration() throws IOException {
+        // These are deliberately opaque boundary fixtures: the MITE port has no Forge item/entity/
+        // dimension/fluid registry here, so B3 must preserve source identifiers and nested tags for
+        // a later placeholder/reporting layer rather than silently replacing them.
+        NBTTagCompound item = codec.toNbt(parseFixture("missing-item.json"), new NBTTagCompound(), true);
+        NBTTagCompound itemTask = task(item);
+        NBTTagCompound itemStack = NbtCompat.getCompoundAt(
+            NbtCompat.getListOrEmpty(itemTask, "requiredItems"), 0);
+        assertEquals("missingmod:crystal", itemStack.getString("id"));
+        assertEquals(2, itemStack.getInteger("Count"));
+        assertEquals(7, itemStack.getShort("Damage"));
+        assertEquals("Unregistered crystal",
+            itemStack.getCompoundTag("tag").getCompoundTag("display").getString("Name"));
+
+        NBTTagCompound entity = codec.toNbt(parseFixture("missing-entity.json"), new NBTTagCompound(), true);
+        NBTTagCompound entityTask = task(entity);
+        assertEquals("missingmod:warden", entityTask.getString("target"));
+        assertEquals("Unregistered target", entityTask.getCompoundTag("targetNBT").getString("CustomName"));
+
+        NBTTagCompound dimension = codec.toNbt(parseFixture("missing-dimension.json"), new NBTTagCompound(), true);
+        NBTTagCompound dimensionTask = task(dimension);
+        assertEquals(77, dimensionTask.getInteger("dimension"));
+        assertEquals(12, dimensionTask.getInteger("posX"));
+        assertEquals(-9, dimensionTask.getInteger("posZ"));
+
+        NBTTagCompound fluid = codec.toNbt(parseFixture("fluid-placeholder.json"), new NBTTagCompound(), true);
+        NBTTagCompound fluidTask = task(fluid);
+        NBTTagCompound fluidStack = NbtCompat.getCompoundAt(
+            NbtCompat.getListOrEmpty(fluidTask, "requiredFluids"), 0);
+        assertEquals("missingmod:brine", fluidStack.getString("FluidName"));
+        assertEquals(1000, fluidStack.getInteger("Amount"));
+        assertEquals(42, fluidStack.getCompoundTag("Tag").getInteger("purity"));
+        assertTrue(fluidTask.hasKey("ignoreNBT") && fluidTask.hasKey("consume")
+            && fluidTask.hasKey("groupDetect") && fluidTask.hasKey("autoConsume"));
+    }
+
+    private static NBTTagCompound task(NBTTagCompound document) {
+        NBTTagCompound quest = NbtCompat.getCompoundAt(
+            NbtCompat.getListOrEmpty(document, "questDatabase"), 0);
+        return NbtCompat.getCompoundAt(NbtCompat.getListOrEmpty(quest, "tasks"), 0);
     }
 
     // -------------------------------------------------------------------- store load/save path

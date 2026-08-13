@@ -1,0 +1,39 @@
+{
+	"questDatabase:9": {
+		"0:10": {
+			"properties:10": {
+				"betterquesting:10": {
+					"name:8": "Missing item boundary"
+				}
+			},
+			"questIDHigh:4": 200,
+			"questIDLow:4": 300,
+			"rewards:9": {},
+			"tasks:9": {
+				"0:10": {
+					"autoConsume:1": 0,
+					"consume:1": 1,
+					"groupDetect:1": 0,
+					"ignoreNBT:1": 0,
+					"index:3": 0,
+					"partialMatch:1": 1,
+					"requiredItems:9": {
+						"0:10": {
+							"Count:3": 2,
+							"Damage:2": 7,
+							"OreDict:8": "",
+							"id:8": "missingmod:crystal",
+							"tag:10": {
+								"display:10": {
+									"Name:8": "Unregistered crystal"
+								}
+							}
+						}
+					},
+					"requireOnlyOneItem:1": 0,
+					"taskID:8": "bq_standard:retrieval"
+				}
+			}
+		}
+	}
+}

@@ -338,7 +338,7 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 
 #### 已知未做
 
-- **无生产调用方**：`JsonDocumentStore`/`JsonSchemaFields` 尚无调用点，`SaveLoadHandler` 等价物、`LegacyQuestImporter`、golden fixture 都还没做。`stamp(root, build)` 的 build 串靠参数传入，因为还没有解析 mod 版本的途径（上游用 `Loader.instance().activeModContainer().getVersion()`，需要 FML 侧 supplier）。
+- **无生产调用方**：`JsonDocumentStore`/`JsonSchemaFields` 尚无调用点，`SaveLoadHandler` 等价物和 `LegacyQuestImporter` 仍未做。`stamp(root, build)` 的 build 串靠参数传入，因为还没有解析 mod 版本的途径（上游用 `Loader.instance().activeModContainer().getVersion()`，需要 FML 侧 supplier）。B3 golden fixture 已在 §4.2f 建立；把 codec 接到数据库读写路径仍属于 B4。
 - **从未用真实上游 1.7.10 世界写出的 `QuestDatabase.json` 验证过**。往返只在自产文档上证明，格式规则逐条对着上游行号复刻。这是唯一能闭合兼容性声明的检查，缺 1.7.10 世界做不了。
 - `format=false` 下 byte[] 与 int[] 真正不可区分，都降级为 long list。
 - quarantine 是 copy 而非 move（与上游一致），重复失败会覆盖上一份隔离副本；且用 `writeAtomically` 复制会整文件进内存。
@@ -349,6 +349,14 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 
 streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无序，而 `SaveLoadHandler.java:314` 用的正是 streaming 路径，故上游实际产出是 hash 序；JSON 成员顺序无语义，上游仍可读）；plain 模式的 list 补上 `endArray()`（上游 `:166-171` 调了 `beginArray()` 却从不 `endArray()`，会让其后每个 tag 错位，因唯一 streaming 调用方传 `format=true` 而潜伏）；`fallbackTagId` 不复刻上游 `:474-510` 的数组扫描（扫完在 `:510` 无条件覆盖为 `9`，不可观测）；非 object 文档拒绝而非静默返回空（上游对空文件返回 null 并让调用方走默认值，会让截断的数据库在下次保存时被空库替换）；null NBT 载荷降级为空值（MITE 单参构造器留 null，1.7.10 不可达）。
 
+### 4.2f B3 golden fixture 套件（已完成）
+
+本批次只新增测试与资源，不接线生产数据库，也不实现 `LegacyQuestImporter`、网络、GUI 或 Fluid Task。资源总数为 **33**：`fixtures/database/` 13 个（4 个空数据库、典型任务库/任务线与 parties、旧单文件和分玩家进度、缺失 item/entity/dimension/fluid placeholder 各 1）；`fixtures/malformed/` 18 个；`fixtures/lenient/` 2 个。超大输入不提交多 MB 文件：测试生成 250,000 元素（约 1.6 MB）数组并验证往返，另以 20,000 层嵌套记录 Gson 2.2.2 的拒绝/栈溢出边界；当前生产 codec 没有字节大小上限，因此这不是“超限文件被生产代码拒绝”的兼容性声明。
+
+字段证据来自仓库内 `BetterQuesting-master` 1.7.10 源码：`SaveLoadHandler` 的文件/根键和流式 `NBTConverter` 路径；`QuestDatabase`、`QuestLineDatabase`、`QuestInstance`、`TaskStorage` 的 ID/进度形状；`TaskRetrieval` + `BigItemStack.writeToNBT` 的 `id`/`Count`/`Damage`/`OreDict`/`tag`；`TaskHunt` 的 `target`/`targetNBT`；`TaskLocation` 的 `dimension`/坐标；`TaskFluid` 与 `JsonHelper.FluidStackToJson` 的 `FluidName`/`Amount`/可选 `Tag` 及 `ignoreNBT`/`consume`/`groupDetect`/`autoConsume`。缺失内容测试只验证 codec/oracle 的不透明保留，不实例化目标平台对象、不静默替换。
+
+`DatabaseFixtureTest` 对 13 个文件逐一做 JSON→NBT、NBT→JSON oracle 差分和往返；compound 按结构比较而非字符串成员顺序，list 按自然索引顺序比较。所有 fixture 都是按源码字段手工构造，仓库没有可运行的真实 1.7.10 世界导出物；因此明确为**未由真实运行产物验证**，不能声称字节级上游兼容。真实上游 `QuestDatabase.json` 世界写出仍是未闭合风险。
+
 ### 4.3 存档/迁移剩余
 
 第 1、4 项已完成（见 §4.2）；读侧与追加写前置已完成（见 §4.2b）。以下项目均未完成，不得在后续报告中声称已落地：
@@ -357,7 +365,7 @@ streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无
 2. ~~持久化身份映射并建立追加审计；迁移报告必须记录身份来源和管理员决定。~~ 已完成，见 §4.2c。
 3. 序列化层与字段语义已完成，见 §4.2d；剩余部分是把 codec 接到各数据库的读写路径（批次 B4）。
 4. ~~实现原子文件写入与带时间戳备份。~~ 已完成，但备份改为显式调用而非每次写入隐式生成（对齐上游，见 §4.2 H1）。替换前的 readback 校验已于 §4.2d 补齐。
-5. 建立 JSON/NBT golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度/**流体**、损坏/截断/超大文件。损坏/截断一类已完成（`a705c49`，18 个 malformed + 2 个 lenient fixture，见 §4.2e），其余全部未做。**注意 `plan.md` 阶段 3 工作项 3 的原始清单含「流体」，此处此前漏记**，照本节派活会少交一类。
+5. ~~建立 JSON/NBT golden fixture：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度/**流体**、损坏/截断/超大文件。~~ B3 已完成，见 §4.2f：13 个 database fixture、18 个 malformed、2 个 lenient；超大输入为生成式压力样本，当前生产 codec 无字节大小上限。
 
 流体一类不可跳过，已核实：上游存在 `bq_standard/tasks/TaskFluid.java`、`api/placeholders/FluidPlaceholder.java`、`api/questing/tasks/IFluidTask.java`，共 17 个文件引用 `FluidStack`/`FluidRegistry`，所以**真实上游存档里可能带流体任务数据**。序列化形状（`TaskFluid.java:70-81`）：`requiredFluids` 是 compound 列表，每项由 Forge `FluidStack.writeToNBT` 写出（`FluidName` 字符串 + `Amount` int + 可选 `Tag` compound），同层还有 `ignoreNBT`/`consume`/`groupDetect`/`autoConsume` 四个 boolean；进度侧 `data` 是 TAG_INT 列表（`:124`）。`FluidStack` 是 Forge 类型而 MITE 无 Forge，故阶段 3 对流体只能**不透明保留 + placeholder + 迁移报告**（对应 `plan.md` 工作项 9），不得静默替换成其他物品，语义解析留待后续阶段。
 
@@ -373,7 +381,7 @@ streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无
 
 1. 先核对 `git status`、`git log` 和当前测试数。
 2. 再读取 `plan.md` 阶段 3 与 `docs/platform-probes.md`。
-3. 派 writer 做 **golden fixture 套件**（批次 B3，§4.3 第 5 项）：空库、典型任务线、旧单文件进度、分玩家进度、缺失物品/实体/维度、损坏/截断/超大文件。codec 已就绪（§4.2d），所以本批次可直接用。**最高价值的一件事**是补上 §4.2d「已知未做」里那条缺口——目前从未用真实上游 1.7.10 世界写出的 `QuestDatabase.json` 验证过往返，只在自产文档上证明。若能拿到真实上游存档，优先做这条；拿不到就明确记录为未闭合，不要声称兼容性已验证。注意 §8：领域层直接暴露 `net.minecraft.NBT*`，故 fixture 测试必须带 Minecraft classpath 跑，不能当纯 JVM 单元测试。
+3. ~~派 writer 做 **golden fixture 套件**（批次 B3，§4.3 第 5 项）。~~ B3 已在 §4.2f 完成并通过定向测试；仍未闭合的是“真实上游 1.7.10 世界写出的 `QuestDatabase.json`”运行产物验证，当前 fixture 均已明确标注为**未由真实运行产物验证**。注意 §8：领域层直接暴露 `net.minecraft.NBT*`，故 fixture 测试必须带 Minecraft classpath 跑，不能当纯 JVM 单元测试。
 
    之后是 B4：把 codec 接到 `QuestDatabase`/`QuestLineDatabase`/`PartyManager`/`QuestSettings` 的读写路径。reviewer 曾建议建立单一 `PropertyNbtCodec` 适配层（§8），可在 B4 一并考虑。
 4. 派 reviewer 复审该批次。**reviewer 主模型直接指定 `S3AI/claude-opus-5`**，不要用配置文件里的 `geek2-claude/claude-opus-5`（本会话连续两次中途断连）。

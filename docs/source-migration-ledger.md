@@ -74,3 +74,17 @@ grep -RhoE '^import [^;]+;' BetterQuesting-master/src/main/java | grep -E 'codec
 4. `betterquesting/api/properties` 的接口与 primitive property 类型：仅在 NBT/ItemStack 依赖可通过适配边界隔离后纳入。
 
 阶段 2 的验证门槛应包括：目标类依赖图复核、无 `net.minecraft`/`net.minecraftforge`/`cpw.mods.fml` import 的编译边界，以及针对标识、查找和序列化行为的单元测试。客户端 GUI、Forge 网络 handler、外部集成与附属方块不属于首批范围。
+
+## 阶段 3 B3 golden fixture 进度
+
+B3 仅覆盖存档格式的测试与资源，未把 codec 接入生产数据库（B4），也未实现 `LegacyQuestImporter`、网络、GUI 或 Fluid Task。当前 `src/test/resources/fixtures` 完整盘点为 **33 个文件**：
+
+| 类别 | 数量 | 覆盖 |
+| --- | ---: | --- |
+| `database` | 13 | 4 空库；典型任务库/任务线与 parties；旧单文件和分玩家进度；缺失 item/entity/dimension/fluid placeholder |
+| `malformed` | 18 | 损坏、截断、NUL 填充、错误根类型、尾随数据、空文档 |
+| `lenient` | 2 | BOM、Gson 2.2.2 接受的宽松 JSON |
+
+`DatabaseFixtureTest` 对全部 13 个 database 文件执行 codec 与 `UpstreamNbtConverterOracle` 的双向结构差分，并验证往返；list 使用自然索引顺序，compound 不做字符串成员顺序断言。缺失内容 fixture 的字段证据分别来自上游 `TaskRetrieval`/`BigItemStack.writeToNBT`、`TaskHunt`、`TaskLocation`、`TaskFluid`/`JsonHelper.FluidStackToJson`，只做不透明保留和迁移边界断言。超大样本由测试生成 250,000 元素数组与 20,000 层嵌套；生产 codec 没有字节大小上限，故不能把该样本描述为生产“超限拒绝”。
+
+所有 database fixture 均为按仓库内上游 1.7.10 源码字段手工构造；仓库没有真实 1.7.10 世界运行产物，故该部分明确标注为**未由真实运行产物验证**，不构成字节级兼容性证明。B4 接线路径与真实世界导出验证仍是后续风险。

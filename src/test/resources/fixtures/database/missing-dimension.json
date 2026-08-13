@@ -1,0 +1,32 @@
+{
+	"questDatabase:9": {
+		"0:10": {
+			"properties:10": {
+				"betterquesting:10": {
+					"name:8": "Missing dimension boundary"
+				}
+			},
+			"questIDHigh:4": 202,
+			"questIDLow:4": 302,
+			"rewards:9": {},
+			"tasks:9": {
+				"0:10": {
+					"biome:3": -1,
+					"dimension:3": 77,
+					"hideInfo:1": 0,
+					"index:3": 0,
+					"invert:1": 0,
+					"name:8": "Unregistered dimension",
+					"posX:3": 12,
+					"posY:3": 64,
+					"posZ:3": -9,
+					"range:3": 8,
+					"structure:8": "",
+					"taskID:8": "bq_standard:location",
+					"taxiCabDist:1": 0,
+					"visible:1": 1
+				}
+			}
+		}
+	}
+}

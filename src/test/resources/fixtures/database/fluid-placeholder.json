@@ -1,0 +1,33 @@
+{
+	"questDatabase:9": {
+		"0:10": {
+			"properties:10": {
+				"betterquesting:10": {
+					"name:8": "Fluid placeholder boundary"
+				}
+			},
+			"questIDHigh:4": 203,
+			"questIDLow:4": 303,
+			"rewards:9": {},
+			"tasks:9": {
+				"0:10": {
+					"autoConsume:1": 0,
+					"consume:1": 1,
+					"groupDetect:1": 0,
+					"ignoreNBT:1": 0,
+					"index:3": 0,
+					"requiredFluids:9": {
+						"0:10": {
+							"Amount:3": 1000,
+							"FluidName:8": "missingmod:brine",
+							"Tag:10": {
+								"purity:3": 42
+							}
+						}
+					},
+					"taskID:8": "bq_standard:fluid"
+				}
+			}
+		}
+	}
+}
