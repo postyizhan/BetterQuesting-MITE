@@ -58,13 +58,18 @@ public final class JsonDocumentStore {
         } catch (MalformedJsonDocumentException malformed) {
             diagnostics.warn("An error occurred while loading JSON from file " + relativePath
                 + ": " + malformed);
-            String quarantinePath = quarantine(relativePath);
+            String quarantinePath = quarantineCopy(relativePath);
             return new LoadResult(Outcome.QUARANTINED, new NBTTagCompound(), quarantinePath);
         }
 
         return loaded
             .map(root -> new LoadResult(Outcome.LOADED, root, null))
             .orElseGet(() -> new LoadResult(Outcome.ABSENT, new NBTTagCompound(), null));
+    }
+
+    /** Copies a document aside using the same recovery naming rule as a parse failure. */
+    public String quarantine(String relativePath) throws IOException {
+        return quarantineCopy(relativePath);
     }
 
     /**
@@ -89,7 +94,7 @@ public final class JsonDocumentStore {
         json.flush();
     }
 
-    private String quarantine(String relativePath) throws IOException {
+    private String quarantineCopy(String relativePath) throws IOException {
         String quarantinePath = quarantineNameFor(relativePath);
         byte[] original = storage.read(relativePath, JsonDocumentStore::readAllBytes)
             .orElse(null);

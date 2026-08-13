@@ -89,4 +89,21 @@ class JsonSchemaFieldsTest {
         assertEquals("1.0.0", restored.getString("build"));
         assertEquals("1", restored.getString("mitePortFormat"));
     }
+
+    @Test
+    void absentAndCurrentPortRevisionsAreCompatibleButFutureAndTypedOnesAreNot() throws IOException {
+        assertTrue(JsonSchemaFields.isCompatibleMitePortFormat(new NBTTagCompound()));
+
+        NBTTagCompound current = new NBTTagCompound();
+        current.setString(JsonSchemaFields.MITE_PORT_FORMAT_KEY, "1");
+        assertTrue(JsonSchemaFields.isCompatibleMitePortFormat(current));
+
+        NBTTagCompound future = new NBTTagCompound();
+        future.setString(JsonSchemaFields.MITE_PORT_FORMAT_KEY, "2");
+        assertFalse(JsonSchemaFields.isCompatibleMitePortFormat(future));
+
+        NBTTagCompound typed = codec.toNbt(JsonDocuments.parseObject(
+            "{\"mitePortFormat:3\":2}"), true);
+        assertFalse(JsonSchemaFields.isCompatibleMitePortFormat(typed));
+    }
 }

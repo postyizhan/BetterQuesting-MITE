@@ -18,6 +18,7 @@ public final class QuestSettingsPersistence {
 
     private final QuestSettings settings;
     private final JsonDocumentStore store;
+    private boolean writesDisabled;
 
     public QuestSettingsPersistence(QuestSettings settings, JsonDocumentStore store) {
         this.settings = Objects.requireNonNull(settings, "settings");
@@ -26,8 +27,15 @@ public final class QuestSettingsPersistence {
 
     /** Loads settings, restoring the existing upstream defaults when the file is absent or bad. */
     public JsonDocumentStore.Outcome load() throws IOException {
+        writesDisabled = false;
         JsonDocumentStore.LoadResult result = store.load(PATH, true);
         if (result.outcome() == JsonDocumentStore.Outcome.LOADED) {
+            if (!JsonSchemaFields.isCompatibleMitePortFormat(result.root())) {
+                store.quarantine(PATH);
+                settings.reset();
+                writesDisabled = true;
+                return JsonDocumentStore.Outcome.QUARANTINED;
+            }
             settings.readFromNBT(result.root());
         } else {
             settings.reset();
@@ -37,8 +45,16 @@ public final class QuestSettingsPersistence {
 
     /** Atomically saves the current settings and validates the temporary JSON by reading it back. */
     public void save(String build) throws IOException {
+        if (writesDisabled) {
+            return;
+        }
         NBTTagCompound root = settings.writeToNBT(new NBTTagCompound());
         JsonSchemaFields.stamp(root, build);
         store.save(PATH, root, true);
+    }
+
+    /** True only after a syntactically valid document carries an unsupported port revision. */
+    public boolean isWritesDisabled() {
+        return writesDisabled;
     }
 }

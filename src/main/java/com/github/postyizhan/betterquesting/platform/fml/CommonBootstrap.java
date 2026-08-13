@@ -77,29 +77,63 @@ public final class CommonBootstrap {
     }
 
     public static void onWorldSave(MinecraftServer server) {
+        onWorldSave(server, false);
+    }
+
+    public static void onWorldSave(MinecraftServer server, boolean worldBeingDeleted) {
         if (server == null || server != questSettingsServer || questSettingsLifecycle == null) {
             return;
         }
+        if (worldBeingDeleted) {
+            try {
+                questSettingsLifecycle.onWorldSave(true);
+            } catch (IOException | RuntimeException failure) {
+                BetterQuestingMod.LOGGER.error(
+                    "BetterQuesting QuestSettings.json could not be discarded during world deletion",
+                    failure);
+            } finally {
+                questSettingsServer = null;
+                questSettingsLifecycle = null;
+            }
+            return;
+        }
+        boolean retryingStopSave = questSettingsLifecycle.isRetryOnWorldSave();
         try {
             questSettingsLifecycle.onWorldSave();
+            if (retryingStopSave) {
+                questSettingsServer = null;
+                questSettingsLifecycle = null;
+            }
         } catch (IOException | RuntimeException failure) {
             BetterQuestingMod.LOGGER.error("BetterQuesting QuestSettings.json could not be saved", failure);
+            if (retryingStopSave) {
+                questSettingsServer = null;
+                questSettingsLifecycle = null;
+            }
         }
     }
 
     public static void onServerStopping(MinecraftServer server) {
+        onServerStopping(server, false);
+    }
+
+    public static void onServerStopping(MinecraftServer server, boolean worldBeingDeleted) {
         BetterQuestingMod.LOGGER.info("Server stop probe observed");
         if (server == questSettingsServer && questSettingsLifecycle != null) {
             try {
-                questSettingsLifecycle.onServerStopping();
+                questSettingsLifecycle.onServerStopping(worldBeingDeleted);
+                questSettingsServer = null;
+                questSettingsLifecycle = null;
             } catch (IOException | RuntimeException failure) {
                 BetterQuestingMod.LOGGER.error(
                     "BetterQuesting QuestSettings.json could not be flushed during server stop",
                     failure);
+                if (!questSettingsLifecycle.isRetryOnWorldSave()) {
+                    questSettingsServer = null;
+                    questSettingsLifecycle = null;
+                }
             }
         }
-        questSettingsServer = null;
-        questSettingsLifecycle = null;
         // The storage object is world-lifetime bound, so it must not survive into the next session.
         ServerIdentityContext.unbind();
     }

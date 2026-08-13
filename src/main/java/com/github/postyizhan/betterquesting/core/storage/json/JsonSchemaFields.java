@@ -1,5 +1,6 @@
 package com.github.postyizhan.betterquesting.core.storage.json;
 
+import com.github.postyizhan.betterquesting.api.util.NbtCompat;
 import net.minecraft.NBTTagCompound;
 
 /**
@@ -81,5 +82,18 @@ public final class JsonSchemaFields {
     public static String readMitePortFormat(NBTTagCompound root) {
         String stored = root == null ? "" : root.getString(MITE_PORT_FORMAT_KEY);
         return stored == null ? "" : stored;
+    }
+
+    /**
+     * Returns true for upstream documents (no port marker) and for this port's exact revision.
+     * Present markers with another NBT type or value are unsupported and must be quarantined before
+     * a later save could rewrite them as the current revision.
+     */
+    public static boolean isCompatibleMitePortFormat(NBTTagCompound root) {
+        if (root == null || !root.hasKey(MITE_PORT_FORMAT_KEY)) {
+            return true;
+        }
+        return NbtCompat.getTagId(root, MITE_PORT_FORMAT_KEY) == 8
+            && MITE_PORT_FORMAT.equals(root.getString(MITE_PORT_FORMAT_KEY));
     }
 }

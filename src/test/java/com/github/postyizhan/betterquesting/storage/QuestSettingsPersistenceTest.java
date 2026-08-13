@@ -79,6 +79,30 @@ class QuestSettingsPersistenceTest {
         assertTrue(document.contains("\"mitePortFormat:8\": \"1\""));
     }
 
+    @Test
+    void futurePortRevisionIsQuarantinedRatherThanDowngradedOnSave() throws IOException {
+        Files.writeString(dataDirectory.resolve(QuestSettingsPersistence.PATH),
+            "{\"betterquesting:10\":{\"pack_name:8\":\"Future\"},"
+                + "\"mitePortFormat:8\":\"2\"}");
+        QuestSettings settings = new QuestSettings();
+
+        assertEquals(JsonDocumentStore.Outcome.QUARANTINED, persistence(settings).load());
+        assertEquals("", settings.getProperty(NativeProps.PACK_NAME));
+        assertTrue(Files.exists(dataDirectory.resolve("malformed_QuestSettings.json.json")));
+    }
+
+    @Test
+    void malformedTypedPortRevisionIsQuarantined() throws IOException {
+        Files.writeString(dataDirectory.resolve(QuestSettingsPersistence.PATH),
+            "{\"betterquesting:10\":{\"pack_name:8\":\"Malformed\"},"
+                + "\"mitePortFormat:3\":2}");
+        QuestSettings settings = new QuestSettings();
+
+        assertEquals(JsonDocumentStore.Outcome.QUARANTINED, persistence(settings).load());
+        assertEquals("", settings.getProperty(NativeProps.PACK_NAME));
+        assertTrue(Files.exists(dataDirectory.resolve("malformed_QuestSettings.json.json")));
+    }
+
     private QuestSettingsPersistence persistence(QuestSettings settings) {
         JsonDocumentStore store = new JsonDocumentStore(
             new DirectoryWorldStorage(dataDirectory), new NbtJsonCodec(warnings::add), warnings::add);
