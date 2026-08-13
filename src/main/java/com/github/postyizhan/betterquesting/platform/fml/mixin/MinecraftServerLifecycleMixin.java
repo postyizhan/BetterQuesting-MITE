@@ -9,6 +9,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(MinecraftServer.class)
 public abstract class MinecraftServerLifecycleMixin {
+    /**
+     * Runtime-only bridge: MinecraftServer is not constructible in the pure-JVM test suite, so the
+     * JSON/default/quarantine contract is covered by QuestSettingsLifecycleTest while this mapped
+     * method descriptor remains verified by compilation against the MITE jar.
+     */
+    @Inject(method = "saveAllWorlds", at = @At("RETURN"))
+    private void betterquesting$onWorldSave(boolean flush, boolean saveAll, CallbackInfo ci) {
+        CommonBootstrap.onWorldSave((MinecraftServer) (Object) this);
+    }
+
     @Inject(method = "stopServer", at = @At("HEAD"))
     private void betterquesting$onServerStopping(CallbackInfo ci) {
         CommonBootstrap.onServerStopping((MinecraftServer) (Object) this);
