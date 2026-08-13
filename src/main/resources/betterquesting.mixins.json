@@ -7,6 +7,9 @@
   "mixins": [
     "MinecraftServerLifecycleMixin"
   ],
+  "client": [
+    "FontRendererMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   },
