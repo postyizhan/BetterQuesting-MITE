@@ -10,9 +10,11 @@ import com.github.postyizhan.betterquesting.questing.QuestLineDatabase;
 import com.github.postyizhan.betterquesting.questing.party.PartyManager;
 import com.github.postyizhan.betterquesting.storage.LifeDatabase;
 import com.github.postyizhan.betterquesting.storage.NameCache;
+import com.github.postyizhan.betterquesting.storage.QuestLootPersistence;
 import com.github.postyizhan.betterquesting.storage.QuestProgressPersistence;
 import com.github.postyizhan.betterquesting.storage.QuestSettings;
 import java.io.IOException;
+import java.util.Objects;
 import moddedmite.rustedironcore.api.event.Handlers;
 import moddedmite.rustedironcore.api.event.listener.IInitializationListener;
 import net.fabricmc.loader.api.FabricLoader;
@@ -34,6 +36,8 @@ public final class CommonBootstrap {
     private static NameCacheLifecycle nameCacheLifecycle;
     private static MinecraftServer lifeDatabaseServer;
     private static LifeDatabaseLifecycle lifeDatabaseLifecycle;
+    private static Object questLootServer;
+    private static QuestLootLifecycle questLootLifecycle;
 
     private CommonBootstrap() {
     }
@@ -55,8 +59,49 @@ public final class CommonBootstrap {
                 loadParties(server);
                 loadNameCache(server);
                 loadLifeDatabase(server);
+                loadQuestLoot(server);
             }
         });
+    }
+
+    private static void loadQuestLoot(MinecraftServer server) {
+        try {
+            QuestLootPersistence.AnalysisResult result;
+            if (server == questLootServer && questLootLifecycle != null) {
+                result = questLootLifecycle.onServerStarted();
+            } else {
+                QuestLootLifecycle lifecycle = new QuestLootLifecycle(
+                    MiteWorldStorage.resolveQuestLootRoot(server));
+                result = startQuestLootLifecycle(server, lifecycle);
+            }
+            LoadLog decision = questLootLoadLog(result);
+            if (decision.warning()) {
+                BetterQuestingMod.LOGGER.warn(decision.message());
+            } else {
+                BetterQuestingMod.LOGGER.info(decision.message());
+            }
+        } catch (IOException | RuntimeException failure) {
+            unbindQuestLoot();
+            BetterQuestingMod.LOGGER.error(
+                "BetterQuesting QuestLoot.json analysis failed closed; loot writes remain disabled",
+                failure);
+        }
+    }
+
+    static LoadLog questLootLoadLog(QuestLootPersistence.AnalysisResult result) {
+        return switch (result.status()) {
+            case ABSENT -> new LoadLog(false,
+                "BetterQuesting QuestLoot.json absent; no loot data loaded and writes disabled");
+            case BLOCKED -> new LoadLog(true,
+                "BetterQuesting QuestLoot.json preserved but not loaded; exact backup copied to "
+                    + result.backupPath().orElseThrow() + "; writes disabled: " + result.detail());
+            case QUARANTINED -> new LoadLog(true,
+                "BetterQuesting QuestLoot.json rejected; source preserved and evidence copied to "
+                    + result.evidencePath().orElseThrow() + "; writes disabled: " + result.detail());
+            case OVERSIZED -> new LoadLog(true,
+                "BetterQuesting QuestLoot.json exceeded the 8 MiB analysis bound and was preserved; "
+                    + "writes disabled");
+        };
     }
 
     private static void loadParties(MinecraftServer server) {
@@ -276,6 +321,43 @@ public final class CommonBootstrap {
         saveParties(server, worldBeingDeleted);
         saveNameCache(server, worldBeingDeleted);
         saveLifeDatabase(server, worldBeingDeleted);
+        onQuestLootWorldSave(server, worldBeingDeleted);
+    }
+
+    static QuestLootPersistence.AnalysisResult startQuestLootLifecycle(Object owner,
+        QuestLootLifecycle lifecycle) throws IOException {
+        Objects.requireNonNull(owner, "owner");
+        Objects.requireNonNull(lifecycle, "lifecycle");
+        if (owner == questLootServer && questLootLifecycle != null) {
+            return questLootLifecycle.onServerStarted();
+        }
+        unbindQuestLoot();
+        QuestLootPersistence.AnalysisResult result = lifecycle.onServerStarted();
+        questLootServer = owner;
+        questLootLifecycle = lifecycle;
+        return result;
+    }
+
+    static void onQuestLootWorldSave(Object owner, boolean worldBeingDeleted) {
+        if (owner != questLootServer || questLootLifecycle == null) return;
+        questLootLifecycle.onWorldSave(worldBeingDeleted);
+        if (worldBeingDeleted) {
+            questLootServer = null;
+            questLootLifecycle = null;
+        }
+    }
+
+    static void onQuestLootServerStopping(Object owner) {
+        if (owner != questLootServer || questLootLifecycle == null) return;
+        questLootLifecycle.onServerStopping();
+        questLootServer = null;
+        questLootLifecycle = null;
+    }
+
+    private static void unbindQuestLoot() {
+        if (questLootLifecycle != null) questLootLifecycle.close();
+        questLootServer = null;
+        questLootLifecycle = null;
     }
 
     private static void saveQuestSettings(MinecraftServer server, boolean worldBeingDeleted) {
@@ -561,6 +643,7 @@ public final class CommonBootstrap {
                 }
             }
         }
+        onQuestLootServerStopping(server);
         ServerIdentityContext.unbind();
     }
 

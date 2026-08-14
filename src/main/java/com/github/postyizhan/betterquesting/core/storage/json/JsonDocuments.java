@@ -75,6 +75,75 @@ public final class JsonDocuments {
         return parseObject(new java.io.ByteArrayInputStream(document.getBytes(StandardCharsets.UTF_8)));
     }
 
+    /** Rejects excessive structure and ambiguous lenient tokens before Gson can recurse. */
+    public static JsonObject parseBoundedObject(String document, int maxDepth) throws IOException {
+        int depth = 0;
+        LexicalState state = LexicalState.NORMAL;
+        boolean escaped = false;
+        char stringDelimiter = 0;
+        for (int index = 0; index < document.length(); index++) {
+            char value = document.charAt(index);
+            switch (state) {
+                case STRING -> {
+                    if (escaped) escaped = false;
+                    else if (value == '\\') escaped = true;
+                    else if (value == stringDelimiter) state = LexicalState.NORMAL;
+                }
+                case LINE_COMMENT -> {
+                    if (value == '\n' || value == '\r') state = LexicalState.NORMAL;
+                }
+                case BLOCK_COMMENT -> {
+                    if (value == '*' && index + 1 < document.length()
+                        && document.charAt(index + 1) == '/') {
+                        state = LexicalState.NORMAL;
+                        index++;
+                    }
+                }
+                case UNQUOTED -> {
+                    if (value == '"' || value == '\'') {
+                        throw malformed("quote inside lenient unquoted JSON token");
+                    }
+                    if (isUnquotedDelimiter(value)) {
+                        state = LexicalState.NORMAL;
+                        index--;
+                    }
+                }
+                case NORMAL -> {
+                    if (value == '"' || value == '\'') {
+                        state = LexicalState.STRING;
+                        stringDelimiter = value;
+                    } else if (value == '#') {
+                        state = LexicalState.LINE_COMMENT;
+                    } else if (value == '/' && index + 1 < document.length()) {
+                        char next = document.charAt(index + 1);
+                        if (next == '/' || next == '*') {
+                            state = next == '/' ? LexicalState.LINE_COMMENT
+                                : LexicalState.BLOCK_COMMENT;
+                            index++;
+                        }
+                    } else if (value == '{' || value == '[') {
+                        if (++depth > maxDepth) {
+                            throw malformed("JSON structural depth exceeds " + maxDepth);
+                        }
+                    } else if ((value == '}' || value == ']') && depth > 0) {
+                        depth--;
+                    } else if (!isGsonWhitespace(value)
+                        && value != ',' && value != ':' && value != ';' && value != '=') {
+                        if (value == '\\') {
+                            throw malformed("backslash in lenient unquoted JSON token");
+                        }
+                        state = LexicalState.UNQUOTED;
+                    }
+                }
+            }
+        }
+        if (state == LexicalState.STRING) throw malformed("unterminated JSON string");
+        if (state == LexicalState.BLOCK_COMMENT) {
+            throw malformed("unterminated JSON block comment");
+        }
+        return parseObject(document);
+    }
+
     /**
      * Opens a tab-indented UTF-8 {@code JsonWriter} over {@code output}. The caller must flush the
      * returned writer; the returned writer owns a buffer over {@code output} but not
@@ -99,4 +168,21 @@ public final class JsonDocuments {
         }
         return "a primitive";
     }
+
+    private static boolean isUnquotedDelimiter(char value) {
+        return isGsonWhitespace(value) || value == '\f' || value == '#' || value == '/'
+            || value == ',' || value == ':' || value == ';' || value == '='
+            || value == '[' || value == ']' || value == '{' || value == '}'
+            || value == '\\';
+    }
+
+    private static boolean isGsonWhitespace(char value) {
+        return value == '\t' || value == '\n' || value == '\r' || value == ' ';
+    }
+
+    private static MalformedJsonDocumentException malformed(String message) {
+        return new MalformedJsonDocumentException(message);
+    }
+
+    private enum LexicalState { NORMAL, UNQUOTED, STRING, LINE_COMMENT, BLOCK_COMMENT }
 }

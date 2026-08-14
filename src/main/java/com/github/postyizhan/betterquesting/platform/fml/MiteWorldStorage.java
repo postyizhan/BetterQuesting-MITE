@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import net.minecraft.ISaveHandler;
 import net.minecraft.SaveHandler;
 import net.minecraft.WorldServer;
@@ -28,6 +30,13 @@ import net.minecraft.server.MinecraftServer;
  */
 public final class MiteWorldStorage implements WorldStorage {
     private static final String DATA_DIRECTORY_NAME = "betterquesting";
+    private static final WorldDirectoryAccess<MinecraftServer, WorldServer, ISaveHandler>
+        MINECRAFT_WORLD_DIRECTORY_ACCESS = new ProductionWorldDirectoryAccess<>(
+            server -> server.worldServers,
+            WorldServer::getSaveHandler,
+            SaveHandler.class::isInstance,
+            handler -> handler.getClass().getName(),
+            handler -> ((SaveHandler) handler).getWorldDirectory());
 
     private final DirectoryWorldStorage storage;
     private final Path dataDirectory;
@@ -45,29 +54,117 @@ public final class MiteWorldStorage implements WorldStorage {
 
     public static MiteWorldStorage resolve(MinecraftServer server) {
         AtomicFileStorage files = new AtomicFileStorage();
+        try {
+            return new MiteWorldStorage(files,
+                betterQuestingDirectory(resolveWorldDirectory(server)), null);
+        } catch (IOException unavailable) {
+            return disabled(files, unavailable.getMessage());
+        }
+    }
+
+    static Path resolveQuestLootRoot(MinecraftServer server) throws IOException {
+        return resolveQuestLootRoot(server, MINECRAFT_WORLD_DIRECTORY_ACCESS);
+    }
+
+    static <S, W, H> Path resolveQuestLootRoot(S server,
+        WorldDirectoryAccess<S, W, H> access) throws IOException {
+        return questLootRoot(resolveWorldDirectory(server, access));
+    }
+
+    static Path betterQuestingDirectory(Path worldDirectory) {
+        return questLootRoot(worldDirectory).resolve(DATA_DIRECTORY_NAME);
+    }
+
+    static Path questLootRoot(Path worldDirectory) {
+        return worldDirectory.toAbsolutePath().normalize();
+    }
+
+    private static Path resolveWorldDirectory(MinecraftServer server) throws IOException {
+        return resolveWorldDirectory(server, MINECRAFT_WORLD_DIRECTORY_ACCESS);
+    }
+
+    private static <S, W, H> Path resolveWorldDirectory(S server,
+        WorldDirectoryAccess<S, W, H> access) throws IOException {
         if (server == null) {
-            return disabled(files, "MinecraftServer instance is unavailable");
+            throw new IOException("MinecraftServer instance is unavailable");
         }
-        WorldServer[] worlds = server.worldServers;
-        if (worlds == null || worlds.length == 0 || worlds[0] == null) {
-            return disabled(files, "overworld is unavailable because worldServers[0] is missing");
+        W overworld = access.worldServer(server, 0);
+        if (overworld == null) {
+            throw new IOException("overworld is unavailable because worldServers[0] is missing");
         }
 
-        ISaveHandler handler = worlds[0].getSaveHandler();
+        H handler = access.saveHandler(overworld);
         if (handler == null) {
-            return disabled(files, "overworld save handler is null");
+            throw new IOException("overworld save handler is null");
         }
-        if (!(handler instanceof SaveHandler)) {
-            return disabled(files, "unsupported save handler implementation: " + handler.getClass().getName());
+        if (!access.isSaveHandler(handler)) {
+            throw new IOException(
+                "unsupported save handler implementation: " + access.saveHandlerType(handler));
         }
 
-        SaveHandler concreteHandler = (SaveHandler) handler;
-        File worldDirectoryFile = concreteHandler.getWorldDirectory();
+        File worldDirectoryFile = access.worldDirectory(handler);
         if (worldDirectoryFile == null) {
-            return disabled(files, "save handler returned a null world directory");
+            throw new IOException("save handler returned a null world directory");
         }
-        Path worldDirectory = worldDirectoryFile.toPath().toAbsolutePath().normalize();
-        return new MiteWorldStorage(files, worldDirectory.resolve(DATA_DIRECTORY_NAME), null);
+        return questLootRoot(worldDirectoryFile.toPath());
+    }
+
+    interface WorldDirectoryAccess<S, W, H> {
+        W worldServer(S server, int index);
+
+        H saveHandler(W world);
+
+        boolean isSaveHandler(H handler);
+
+        String saveHandlerType(H handler);
+
+        File worldDirectory(H handler);
+    }
+
+    static final class ProductionWorldDirectoryAccess<S, W, H>
+        implements WorldDirectoryAccess<S, W, H> {
+        private final Function<S, W[]> worlds;
+        private final Function<W, H> saveHandler;
+        private final Predicate<H> supportedHandler;
+        private final Function<H, String> handlerType;
+        private final Function<H, File> worldDirectory;
+
+        ProductionWorldDirectoryAccess(Function<S, W[]> worlds, Function<W, H> saveHandler,
+            Predicate<H> supportedHandler, Function<H, String> handlerType,
+            Function<H, File> worldDirectory) {
+            this.worlds = worlds;
+            this.saveHandler = saveHandler;
+            this.supportedHandler = supportedHandler;
+            this.handlerType = handlerType;
+            this.worldDirectory = worldDirectory;
+        }
+
+        @Override
+        public W worldServer(S server, int index) {
+            W[] available = worlds.apply(server);
+            return available == null || index < 0 || index >= available.length
+                ? null : available[index];
+        }
+
+        @Override
+        public H saveHandler(W world) {
+            return saveHandler.apply(world);
+        }
+
+        @Override
+        public boolean isSaveHandler(H handler) {
+            return supportedHandler.test(handler);
+        }
+
+        @Override
+        public String saveHandlerType(H handler) {
+            return handlerType.apply(handler);
+        }
+
+        @Override
+        public File worldDirectory(H handler) {
+            return worldDirectory.apply(handler);
+        }
     }
 
     private static MiteWorldStorage disabled(AtomicFileStorage files, String reason) {

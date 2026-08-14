@@ -213,7 +213,7 @@ accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
 - **`WorldStorage` 是纯写侧**。上游加载路径需要 read/exists/list/delete（`SaveLoadHandler` 要读 6 个文件并列 `QuestProgress/` 目录）。补读侧时会改接口，越晚接线越贵。
 - **`MiteWorldStorage` 是世界生命周期绑定对象**，不能静态缓存。集成服务器每次进入世界都新建 server 与 save handler，缓存会让第二个世界继续写第一个世界的目录。且 `worldServers` 只在 `loadAllWorlds` 中赋值，在 world load 前调用 `resolve()` 会**永久固化为禁用**，无重试路径。
 - **路径守卫只做词法 `normalize()`**，不解析符号链接。`betterquesting/` 下的符号链接可绕出目录。一旦 `relativePath` 来自客户端数据包，必须改成白名单或 `toRealPath()`。
-- **`MiteWorldStorage` 无测试**，依赖 `MinecraftServer`。守卫逻辑已抽到 `StoragePaths` 纯函数并有覆盖，但禁用分支与目录解析仍只有人眼核对。
+- **`MiteWorldStorage` 的真实游戏集成仍未运行验证**。`MiteWorldStoragePathTest` 已覆盖 world-root/data-directory 分流、注入式 production adapter 和以 Minecraft 类型替身执行 mapped overload；真实 `MinecraftServer`/save handler 初始化及禁用分支仍未做端到端测试。
 - **POSIX 权限未实测**。已改回上游的 `FileOutputStream` 建 tmp（走 umask）而非 `Files.createTempFile`（owner-only 0600），但结论来自 javadoc 推断，需 Linux smoke test。
 
 ### 4.2b `WorldStorage` 读侧与追加写（已完成）
@@ -375,7 +375,11 @@ streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无
 8. 目标平台缺失物品、实体、维度等内容时生成 placeholder 和迁移报告，不得静默替换成其他内容。
 9. 最后接回 `NameCache`/`QuestCache`；`IQuestSettings.canUserEdit` 随 `NameCache` 后续处理，不能遗漏或让网络/GUI 假设权限检查已存在。
 
-`QuestLoot.json` 在阶段 3 **只做识别、备份和不透明保留**；语义解析等阶段 7 的 LootRegistry。
+`QuestLoot.json` 在阶段 3 **只做识别、备份/损坏证据留存和不透明保留**；语义解析仍属于阶段 7 的 LootRegistry。B4.6 的存储威胁模型与本 mod 其余基于路径的 world persistence 一致：宿主进程和本地用户受信任。操作开始时已经存在的意外 symlink/reparse point、非常规 source、恶意文件 bytes、截断、超限、深度攻击、普通 I/O 失败、命名碰撞和部分写入属于范围内；恶意本地参与者在操作期间并发替换父目录、junction 或预留文件不属于范围内。实现不会也不得声称父路径遍历 race-free。
+
+生产路径使用 Windows/macOS 默认 Java provider 均提供的普通 NIO API：立即把非符号链接 world root 解析为 canonical root，确认固定的直接子项 `QuestLoot.json` 仍受该 root 包含，以 `NOFOLLOW_LINKS` 读取属性并只接受 regular file。source channel 优先以 `READ + NOFOLLOW_LINKS` 打开；provider 不支持该 open option 时才退回 `READ`，并在打开前后按上述 trusted-local-host 模型复验 source/root identity。B4.6 的这套实际路径实现只在 macOS/Java 17 上做过运行测试；Windows 分支只使用可移植 API 并保留 provider fallback，但本轮未在 Windows 上运行，不能把旧的 Windows 追加写探针当成这条路径的运行证据。每次 lifecycle/start 只捕获一次 immutable bytes，最多读取 8 MiB + 1 byte；严格 UTF-8 decode 后，深度上限 128 的保守预检在进入 Gson 2.2.2 前识别双/单引号、三种 lenient comment。token 边界逐项对齐 Gson 2.2.2：`nextNonWhitespace` 只跳过 ASCII tab/LF/CR/space，unquoted literal 另把 form feed 当 delimiter；U+2003 等非 ASCII whitespace 仍属于 unquoted token，因此其后的 quote/backslash 会在 Gson 递归前按歧义 token 拒绝。正确引用字符串内的普通 Unicode 仍有效。
+
+缺失报告 `ABSENT`。上游 `groups:9` legacy envelope、当前 `mitePortFormat:8="1"` 和 future canonical positive integer 版本均报告 opaque `BLOCKED`，但仅在从捕获 bytes 生成 exact-byte `*.recognized.bak` 后返回。畸形、非 object、类型错误、词法歧义、非法 UTF-8 或深度超限仅在 exact-byte `*.corrupt.evidence` 成功后报告 `QUARANTINED`。两类副本都在 source 旁以 `CREATE_NEW` 直接预留最终名称并通过同一 channel 写入捕获 bytes，随后 file fsync，并在 provider 支持时 parent fsync；不再把 temp atomic-move 到已存在的 reservation，因此兼容 Windows 默认 provider。既有 source/backup/evidence 不被覆盖，碰撞使用数字 suffix，普通写入或 sync 失败会清理本次不完整目标，清理失败作为 suppressed exception 保留。这不是 atomic publication：最终路径从 `CREATE_NEW` 起可见，成功返回前其他观察者可能读到增长中的文件；进程崩溃或断电可能留下不完整目标，阶段 3 不做 power-loss recovery，后续重试会把残留视为碰撞并使用数字 suffix。副本失败时 lifecycle fail closed 且不缓存成功；同一 lifecycle 的后续 start 会在无成功缓存时重试，成功后只缓存/绑定一次。超过 8 MiB 报告 `OVERSIZED`，source 原样保留且不生成副本；阶段 3 没有任何 QuestLoot serialization/writeback 路径。重复同 owner start 返回已完成分析和同一副本，world delete/server stop 会清理绑定，跨 world rebind 会关闭旧 lifecycle。
 
 ### 4.4 下一会话首轮动作
 
@@ -393,7 +397,7 @@ streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无
 
 仍然存在的：`MitePlayerIdentityAdapter` 尚未用真实 `EntityPlayer` 做测试；`ServerIdentityContext` 零自动化测试且 RIC server-started 触发时机未经运行验证；container GUI blocker 仍存在。
 
-`WorldStorage` 的残余风险分两处：§4.2「已知未做」（无 readback 校验、生命周期绑定未接线、符号链接可绕过词法守卫、`MiteWorldStorage` 无测试、POSIX 权限未实测）与 §4.2b「已知未做」（无父目录 fsync、无故障注入测试、同路径并发无内部锁、Linux 异常映射未实测）。§4.2 的「纯写侧接口」一条已由 §4.2b 解决。
+`WorldStorage` 的残余风险分两处：§4.2「已知未做」（无 readback 校验、生命周期绑定未接线、符号链接可绕过词法守卫、真实 Minecraft server/save handler 集成未运行验证、POSIX 权限未实测）与 §4.2b「已知未做」（无父目录 fsync、无故障注入测试、同路径并发无内部锁、Linux 异常映射未实测）。`MiteWorldStoragePathTest` 现已覆盖纯路径分流、production adapter 与 mapped overload 类型替身；§4.2 的「纯写侧接口」一条已由 §4.2b 解决。
 
 ---
 
