@@ -113,6 +113,8 @@ class DatabaseFixtureTest {
         // A deletion or an accidental rename is caught here rather than silently shrinking coverage.
         assertEquals(
             List.of(
+                "empty-life-database.json",
+                "empty-name-cache.json",
                 "empty-parties.json",
                 "empty-quest-database.json",
                 "empty-quest-line-database.json",
@@ -124,6 +126,8 @@ class DatabaseFixtureTest {
                 "missing-item.json",
                 "player-quest-progress.json",
                 "quest-line-twelve-quests.json",
+                "typical-life-database.json",
+                "typical-name-cache.json",
                 "typical-parties.json",
                 "typical-quest-database.json"),
             MalformedJsonFixtures.names(DATABASE));

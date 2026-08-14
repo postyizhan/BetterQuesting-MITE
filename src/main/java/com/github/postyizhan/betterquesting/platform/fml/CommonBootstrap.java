@@ -2,10 +2,13 @@ package com.github.postyizhan.betterquesting.platform.fml;
 
 import com.github.postyizhan.betterquesting.BetterQuestingMod;
 import com.github.postyizhan.betterquesting.core.BetterQuestingConstants;
+import com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore;
 import com.github.postyizhan.betterquesting.network.probe.ProbePackets;
 import com.github.postyizhan.betterquesting.questing.QuestDatabase;
 import com.github.postyizhan.betterquesting.questing.QuestLineDatabase;
 import com.github.postyizhan.betterquesting.questing.party.PartyManager;
+import com.github.postyizhan.betterquesting.storage.LifeDatabase;
+import com.github.postyizhan.betterquesting.storage.NameCache;
 import com.github.postyizhan.betterquesting.storage.QuestSettings;
 import java.io.IOException;
 import moddedmite.rustedironcore.api.event.Handlers;
@@ -21,6 +24,10 @@ public final class CommonBootstrap {
     private static QuestDatabaseLifecycle questDatabaseLifecycle;
     private static MinecraftServer partyManagerServer;
     private static PartyManagerLifecycle partyManagerLifecycle;
+    private static MinecraftServer nameCacheServer;
+    private static NameCacheLifecycle nameCacheLifecycle;
+    private static MinecraftServer lifeDatabaseServer;
+    private static LifeDatabaseLifecycle lifeDatabaseLifecycle;
 
     private CommonBootstrap() {
     }
@@ -39,6 +46,8 @@ public final class CommonBootstrap {
                 loadQuestSettings(server);
                 loadQuestDatabases(server);
                 loadParties(server);
+                loadNameCache(server);
+                loadLifeDatabase(server);
             }
         });
     }
@@ -109,6 +118,73 @@ public final class CommonBootstrap {
         }
     }
 
+    private static void loadNameCache(MinecraftServer server) {
+        try {
+            MiteWorldStorage storage = MiteWorldStorage.resolve(server);
+            if (!storage.isAvailable()) {
+                throw new IOException("BetterQuesting name cache storage is unavailable: "
+                    + storage.getDisabledReason().orElse("unknown reason"));
+            }
+            NameCacheLifecycle lifecycle = new NameCacheLifecycle(storage, NameCache.INSTANCE, currentBuild());
+            JsonDocumentStore.Outcome outcome = lifecycle.onServerStarted();
+            nameCacheServer = server;
+            nameCacheLifecycle = lifecycle;
+            logIdentityDatabaseLoad(outcome, "NameCache.json", "name cache");
+        } catch (IOException | RuntimeException failure) {
+            nameCacheServer = null;
+            nameCacheLifecycle = null;
+            NameCache.INSTANCE.reset();
+            BetterQuestingMod.LOGGER.error(
+                "BetterQuesting NameCache.json could not be loaded; name cache remains empty", failure);
+        }
+    }
+
+    private static void loadLifeDatabase(MinecraftServer server) {
+        try {
+            MiteWorldStorage storage = MiteWorldStorage.resolve(server);
+            if (!storage.isAvailable()) {
+                throw new IOException("BetterQuesting life database storage is unavailable: "
+                    + storage.getDisabledReason().orElse("unknown reason"));
+            }
+            LifeDatabaseLifecycle lifecycle = new LifeDatabaseLifecycle(
+                storage, LifeDatabase.INSTANCE, currentBuild());
+            JsonDocumentStore.Outcome outcome = lifecycle.onServerStarted();
+            lifeDatabaseServer = server;
+            lifeDatabaseLifecycle = lifecycle;
+            logIdentityDatabaseLoad(outcome, "LifeDatabase.json", "life database");
+        } catch (IOException | RuntimeException failure) {
+            lifeDatabaseServer = null;
+            lifeDatabaseLifecycle = null;
+            LifeDatabase.INSTANCE.reset();
+            BetterQuestingMod.LOGGER.error(
+                "BetterQuesting LifeDatabase.json could not be loaded; life database remains empty", failure);
+        }
+    }
+
+    private static void logIdentityDatabaseLoad(JsonDocumentStore.Outcome outcome, String document,
+        String emptyState) {
+        LoadLog decision = identityDatabaseLoadLog(outcome, document, emptyState);
+        if (decision.warning()) {
+            BetterQuestingMod.LOGGER.warn(decision.message());
+        } else {
+            BetterQuestingMod.LOGGER.info(decision.message());
+        }
+    }
+
+    static LoadLog identityDatabaseLoadLog(JsonDocumentStore.Outcome outcome, String document,
+        String emptyState) {
+        return switch (outcome) {
+            case LOADED -> new LoadLog(false, "Loaded BetterQuesting " + document);
+            case ABSENT -> new LoadLog(false,
+                "BetterQuesting " + document + " absent; using default-empty " + emptyState);
+            case QUARANTINED -> new LoadLog(true,
+                "BetterQuesting " + document + " quarantined; " + emptyState + " empty, writes disabled");
+        };
+    }
+
+    record LoadLog(boolean warning, String message) {
+    }
+
     private static void loadQuestSettings(MinecraftServer server) {
         try {
             MiteWorldStorage storage = MiteWorldStorage.resolve(server);
@@ -143,6 +219,8 @@ public final class CommonBootstrap {
         saveQuestSettings(server, worldBeingDeleted);
         saveQuestDatabases(server, worldBeingDeleted);
         saveParties(server, worldBeingDeleted);
+        saveNameCache(server, worldBeingDeleted);
+        saveLifeDatabase(server, worldBeingDeleted);
     }
 
     private static void saveQuestSettings(MinecraftServer server, boolean worldBeingDeleted) {
@@ -226,6 +304,60 @@ public final class CommonBootstrap {
         }
     }
 
+    private static void saveNameCache(MinecraftServer server, boolean worldBeingDeleted) {
+        if (server != nameCacheServer || nameCacheLifecycle == null) return;
+        if (worldBeingDeleted) {
+            try {
+                nameCacheLifecycle.onWorldSave(true);
+            } catch (IOException | RuntimeException failure) {
+                BetterQuestingMod.LOGGER.error(
+                    "BetterQuesting NameCache.json could not be discarded during world deletion", failure);
+            } finally {
+                nameCacheServer = null;
+                nameCacheLifecycle = null;
+            }
+            return;
+        }
+        boolean retryingStopSave = nameCacheLifecycle.isRetryOnWorldSave();
+        try {
+            nameCacheLifecycle.onWorldSave();
+        } catch (IOException | RuntimeException failure) {
+            BetterQuestingMod.LOGGER.error("BetterQuesting NameCache.json could not be saved", failure);
+        } finally {
+            if (retryingStopSave) {
+                nameCacheServer = null;
+                nameCacheLifecycle = null;
+            }
+        }
+    }
+
+    private static void saveLifeDatabase(MinecraftServer server, boolean worldBeingDeleted) {
+        if (server != lifeDatabaseServer || lifeDatabaseLifecycle == null) return;
+        if (worldBeingDeleted) {
+            try {
+                lifeDatabaseLifecycle.onWorldSave(true);
+            } catch (IOException | RuntimeException failure) {
+                BetterQuestingMod.LOGGER.error(
+                    "BetterQuesting LifeDatabase.json could not be discarded during world deletion", failure);
+            } finally {
+                lifeDatabaseServer = null;
+                lifeDatabaseLifecycle = null;
+            }
+            return;
+        }
+        boolean retryingStopSave = lifeDatabaseLifecycle.isRetryOnWorldSave();
+        try {
+            lifeDatabaseLifecycle.onWorldSave();
+        } catch (IOException | RuntimeException failure) {
+            BetterQuestingMod.LOGGER.error("BetterQuesting LifeDatabase.json could not be saved", failure);
+        } finally {
+            if (retryingStopSave) {
+                lifeDatabaseServer = null;
+                lifeDatabaseLifecycle = null;
+            }
+        }
+    }
+
     public static void onServerStopping(MinecraftServer server) {
         onServerStopping(server, false);
     }
@@ -274,6 +406,34 @@ public final class CommonBootstrap {
                 if (!partyManagerLifecycle.isRetryOnWorldSave()) {
                     partyManagerServer = null;
                     partyManagerLifecycle = null;
+                }
+            }
+        }
+        if (server == nameCacheServer && nameCacheLifecycle != null) {
+            try {
+                nameCacheLifecycle.onServerStopping(worldBeingDeleted);
+                nameCacheServer = null;
+                nameCacheLifecycle = null;
+            } catch (IOException | RuntimeException failure) {
+                BetterQuestingMod.LOGGER.error(
+                    "BetterQuesting NameCache.json could not be flushed during server stop", failure);
+                if (!nameCacheLifecycle.isRetryOnWorldSave()) {
+                    nameCacheServer = null;
+                    nameCacheLifecycle = null;
+                }
+            }
+        }
+        if (server == lifeDatabaseServer && lifeDatabaseLifecycle != null) {
+            try {
+                lifeDatabaseLifecycle.onServerStopping(worldBeingDeleted);
+                lifeDatabaseServer = null;
+                lifeDatabaseLifecycle = null;
+            } catch (IOException | RuntimeException failure) {
+                BetterQuestingMod.LOGGER.error(
+                    "BetterQuesting LifeDatabase.json could not be flushed during server stop", failure);
+                if (!lifeDatabaseLifecycle.isRetryOnWorldSave()) {
+                    lifeDatabaseServer = null;
+                    lifeDatabaseLifecycle = null;
                 }
             }
         }
