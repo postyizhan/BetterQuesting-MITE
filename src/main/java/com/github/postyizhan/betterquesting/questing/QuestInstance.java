@@ -16,6 +16,7 @@ import com.github.postyizhan.betterquesting.platform.api.DirtyPlayerSink;
 import com.github.postyizhan.betterquesting.questing.rewards.RewardStorage;
 import com.github.postyizhan.betterquesting.questing.tasks.TaskStorage;
 import com.github.postyizhan.betterquesting.storage.PropertyContainer;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -37,7 +38,7 @@ public class QuestInstance implements IQuest {
     private Set<UUID> preRequisites = new HashSet<>();
     private final Map<UUID, RequirementType> prereqTypes = new HashMap<>();
     private final PropertyContainer qInfo = new PropertyContainer();
-    private final DirtyPlayerSink dirtyPlayers;
+    private DirtyPlayerSink dirtyPlayers;
 
     public QuestInstance() {
         this(DirtyPlayerSink.NO_OP);
@@ -46,6 +47,10 @@ public class QuestInstance implements IQuest {
     public QuestInstance(DirtyPlayerSink dirtyPlayers) {
         this.dirtyPlayers = dirtyPlayers == null ? DirtyPlayerSink.NO_OP : dirtyPlayers;
         setupProps();
+    }
+
+    public void setDirtyPlayerSink(DirtyPlayerSink dirtyPlayers) {
+        this.dirtyPlayers = dirtyPlayers == null ? DirtyPlayerSink.NO_OP : dirtyPlayers;
     }
 
     private void setupProps() {
@@ -107,6 +112,7 @@ public class QuestInstance implements IQuest {
     @Override
     public void setComplete(UUID uuid, long timestamp) {
         if (uuid == null) return;
+        boolean changed;
         synchronized (completeUsers) {
             NBTTagCompound entry = getCompletionInfo(uuid);
             if (entry == null) {
@@ -115,8 +121,9 @@ public class QuestInstance implements IQuest {
             }
             entry.setBoolean("claimed", false);
             entry.setLong("timestamp", timestamp);
-            dirtyPlayers.markDirty(uuid);
+            changed = true;
         }
+        if (changed) dirtyPlayers.markDirty(uuid);
         for (DBEntry<ITask> entry : tasks.getEntries()) {
             ITask task = entry.getValue();
             if (task != null && task.ignored(uuid)) task.setComplete(uuid);
@@ -140,14 +147,15 @@ public class QuestInstance implements IQuest {
         if (uuid == null) return;
         synchronized (completeUsers) {
             if (nbt == null) completeUsers.remove(uuid); else completeUsers.put(uuid, nbt);
-            dirtyPlayers.markDirty(uuid);
         }
+        dirtyPlayers.markDirty(uuid);
     }
 
     @Override
     public void resetUser(UUID uuid, boolean fullReset) {
+        Set<UUID> dirty;
         synchronized (completeUsers) {
-            Set<UUID> dirty = new HashSet<>();
+            dirty = new HashSet<>();
             if (uuid == null) dirty.addAll(completeUsers.keySet()); else dirty.add(uuid);
             if (fullReset) {
                 if (uuid == null) completeUsers.clear(); else completeUsers.remove(uuid);
@@ -163,9 +171,9 @@ public class QuestInstance implements IQuest {
                     entry.setLong("timestamp", 0);
                 }
             }
-            dirtyPlayers.markDirty(dirty);
-            tasks.getEntries().forEach(entry -> entry.getValue().resetUser(uuid));
         }
+        tasks.getEntries().forEach(entry -> entry.getValue().resetUser(uuid));
+        dirtyPlayers.markDirty(dirty);
     }
 
     @Override
@@ -262,13 +270,15 @@ public class QuestInstance implements IQuest {
     public NBTTagCompound writeProgressToNBT(NBTTagCompound nbt, List<UUID> users) {
         synchronized (completeUsers) {
             NBTTagList completed = new NBTTagList();
-            for (Map.Entry<UUID, NBTTagCompound> entry : completeUsers.entrySet()) {
-                if (entry.getKey() == null || entry.getValue() == null) continue;
-                if (users != null && !users.contains(entry.getKey())) continue;
-                NBTTagCompound tag = (NBTTagCompound) entry.getValue().copy();
-                tag.setString("uuid", entry.getKey().toString());
-                completed.appendTag(tag);
-            }
+            completeUsers.entrySet().stream()
+                .filter(entry -> entry.getKey() != null && entry.getValue() != null)
+                .filter(entry -> users == null || users.contains(entry.getKey()))
+                .sorted(Map.Entry.comparingByKey(Comparator.comparing(UUID::toString)))
+                .forEach(entry -> {
+                    NBTTagCompound tag = (NBTTagCompound) entry.getValue().copy();
+                    tag.setString("uuid", entry.getKey().toString());
+                    completed.appendTag(tag);
+                });
             nbt.setTag("completed", completed);
             nbt.setTag("tasks", tasks.writeProgressToNBT(new NBTTagList(), users));
             return nbt;
@@ -307,8 +317,8 @@ public class QuestInstance implements IQuest {
             }
             entry.setBoolean("claimed", true);
             entry.setLong("timestamp", timestamp);
-            dirtyPlayers.markDirty(uuid);
         }
+        dirtyPlayers.markDirty(uuid);
     }
 
     public void getUsersWithCompletionData(Set<UUID> target) {

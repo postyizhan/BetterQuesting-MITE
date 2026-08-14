@@ -13,11 +13,7 @@ public abstract class MinecraftServerLifecycleMixin {
     @Shadow
     private boolean worldIsBeingDeleted;
 
-    /**
-     * Runtime-only bridge: MinecraftServer is not constructible in the pure-JVM test suite, so the
-     * JSON/default/quarantine contract is covered by QuestSettingsLifecycleTest. Compilation checks
-     * the shadowed deletion-state field, while Mixin resolves the string method targets at runtime.
-     */
+    /** Runtime bridge; pure-JVM tests invoke the same CommonBootstrap callback coordinator. */
     @Inject(method = "saveAllWorlds", at = @At("RETURN"))
     private void betterquesting$onWorldSave(boolean flush, boolean saveAll, CallbackInfo ci) {
         CommonBootstrap.onWorldSave((MinecraftServer) (Object) this, worldIsBeingDeleted);
