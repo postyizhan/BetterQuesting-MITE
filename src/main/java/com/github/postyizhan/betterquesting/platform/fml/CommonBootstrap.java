@@ -5,6 +5,7 @@ import com.github.postyizhan.betterquesting.core.BetterQuestingConstants;
 import com.github.postyizhan.betterquesting.network.probe.ProbePackets;
 import com.github.postyizhan.betterquesting.questing.QuestDatabase;
 import com.github.postyizhan.betterquesting.questing.QuestLineDatabase;
+import com.github.postyizhan.betterquesting.questing.party.PartyManager;
 import com.github.postyizhan.betterquesting.storage.QuestSettings;
 import java.io.IOException;
 import moddedmite.rustedironcore.api.event.Handlers;
@@ -18,6 +19,8 @@ public final class CommonBootstrap {
     private static QuestSettingsLifecycle questSettingsLifecycle;
     private static MinecraftServer questDatabaseServer;
     private static QuestDatabaseLifecycle questDatabaseLifecycle;
+    private static MinecraftServer partyManagerServer;
+    private static PartyManagerLifecycle partyManagerLifecycle;
 
     private CommonBootstrap() {
     }
@@ -35,8 +38,32 @@ public final class CommonBootstrap {
                 loadIdentityMappings(server);
                 loadQuestSettings(server);
                 loadQuestDatabases(server);
+                loadParties(server);
             }
         });
+    }
+
+    private static void loadParties(MinecraftServer server) {
+        try {
+            MiteWorldStorage storage = MiteWorldStorage.resolve(server);
+            if (!storage.isAvailable()) {
+                throw new IOException("BetterQuesting party storage is unavailable: "
+                    + storage.getDisabledReason().orElse("unknown reason"));
+            }
+            PartyManagerLifecycle lifecycle = new PartyManagerLifecycle(
+                storage, PartyManager.INSTANCE, currentBuild());
+            lifecycle.onServerStarted();
+            partyManagerServer = server;
+            partyManagerLifecycle = lifecycle;
+            BetterQuestingMod.LOGGER.info("Loaded BetterQuesting QuestingParties.json");
+        } catch (IOException | RuntimeException failure) {
+            partyManagerServer = null;
+            partyManagerLifecycle = null;
+            PartyManager.INSTANCE.reset();
+            BetterQuestingMod.LOGGER.error(
+                "BetterQuesting QuestingParties.json could not be loaded; parties remain empty",
+                failure);
+        }
     }
 
     private static void loadQuestDatabases(MinecraftServer server) {
@@ -115,6 +142,7 @@ public final class CommonBootstrap {
         }
         saveQuestSettings(server, worldBeingDeleted);
         saveQuestDatabases(server, worldBeingDeleted);
+        saveParties(server, worldBeingDeleted);
     }
 
     private static void saveQuestSettings(MinecraftServer server, boolean worldBeingDeleted) {
@@ -171,6 +199,33 @@ public final class CommonBootstrap {
         }
     }
 
+    private static void saveParties(MinecraftServer server, boolean worldBeingDeleted) {
+        if (server != partyManagerServer || partyManagerLifecycle == null) return;
+        if (worldBeingDeleted) {
+            try {
+                partyManagerLifecycle.onWorldSave(true);
+            } catch (IOException | RuntimeException failure) {
+                BetterQuestingMod.LOGGER.error(
+                    "BetterQuesting QuestingParties.json could not be discarded during world deletion", failure);
+            } finally {
+                partyManagerServer = null;
+                partyManagerLifecycle = null;
+            }
+            return;
+        }
+        boolean retryingStopSave = partyManagerLifecycle.isRetryOnWorldSave();
+        try {
+            partyManagerLifecycle.onWorldSave();
+        } catch (IOException | RuntimeException failure) {
+            BetterQuestingMod.LOGGER.error("BetterQuesting QuestingParties.json could not be saved", failure);
+        } finally {
+            if (retryingStopSave) {
+                partyManagerServer = null;
+                partyManagerLifecycle = null;
+            }
+        }
+    }
+
     public static void onServerStopping(MinecraftServer server) {
         onServerStopping(server, false);
     }
@@ -204,6 +259,21 @@ public final class CommonBootstrap {
                 if (!questDatabaseLifecycle.isRetryOnWorldSave()) {
                     questDatabaseServer = null;
                     questDatabaseLifecycle = null;
+                }
+            }
+        }
+        if (server == partyManagerServer && partyManagerLifecycle != null) {
+            try {
+                partyManagerLifecycle.onServerStopping(worldBeingDeleted);
+                partyManagerServer = null;
+                partyManagerLifecycle = null;
+            } catch (IOException | RuntimeException failure) {
+                BetterQuestingMod.LOGGER.error(
+                    "BetterQuesting QuestingParties.json could not be flushed during server stop",
+                    failure);
+                if (!partyManagerLifecycle.isRetryOnWorldSave()) {
+                    partyManagerServer = null;
+                    partyManagerLifecycle = null;
                 }
             }
         }
