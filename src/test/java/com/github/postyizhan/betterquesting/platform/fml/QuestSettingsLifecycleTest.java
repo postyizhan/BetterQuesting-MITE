@@ -92,26 +92,32 @@ class QuestSettingsLifecycleTest {
     }
 
     @Test
-    void unsupportedPortFormatDisablesWorldAndStopSavesForTheSession() throws IOException {
-        String original = "{\"betterquesting:10\":{\"pack_name:8\":\"Future\"},"
-            + "\"mitePortFormat:8\":\"2\"}";
-        Files.writeString(dataDirectory.resolve(QuestSettingsPersistence.PATH), original);
-        QuestSettings settings = new QuestSettings();
-        QuestSettingsLifecycle lifecycle = new QuestSettingsLifecycle(
-            new FlushTrackingStorage(dataDirectory), settings, "1.0.0");
+    void quarantinedSettingsDisableWorldAndStopSavesForTheSession() throws IOException {
+        for (String original : List.of(
+            "{\"betterquesting:10\":{\"pack_name:8\":\"Future\"},\"mitePortFormat:8\":\"2\"}",
+            "{\"betterquesting:10\":{\"pack_name:8\":\"WrongType\"},\"mitePortFormat:3\":2}",
+            "{\"pack_name:8\":"
+        )) {
+            Files.writeString(dataDirectory.resolve(QuestSettingsPersistence.PATH), original);
+            QuestSettings settings = new QuestSettings();
+            settings.setProperty(NativeProps.PACK_NAME, "Stale");
+            QuestSettingsLifecycle lifecycle = new QuestSettingsLifecycle(
+                new FlushTrackingStorage(dataDirectory), settings, "1.0.0");
 
-        assertEquals(JsonDocumentStore.Outcome.QUARANTINED,
-            lifecycle.onServerStarted());
-        settings.setProperty(NativeProps.PACK_NAME, "DefaultsStayActive");
+            assertEquals(JsonDocumentStore.Outcome.QUARANTINED,
+                lifecycle.onServerStarted());
+            assertEquals("", settings.getProperty(NativeProps.PACK_NAME));
+            settings.setProperty(NativeProps.PACK_NAME, "DefaultsStayActive");
 
-        lifecycle.onWorldSave();
-        assertArrayEquals(original.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            Files.readAllBytes(dataDirectory.resolve(QuestSettingsPersistence.PATH)));
-        lifecycle.onServerStopping();
+            lifecycle.onWorldSave();
+            assertArrayEquals(original.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                Files.readAllBytes(dataDirectory.resolve(QuestSettingsPersistence.PATH)));
+            lifecycle.onServerStopping();
 
-        assertArrayEquals(original.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            Files.readAllBytes(dataDirectory.resolve(QuestSettingsPersistence.PATH)));
-        assertEquals("", settings.getProperty(NativeProps.PACK_NAME));
+            assertArrayEquals(original.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                Files.readAllBytes(dataDirectory.resolve(QuestSettingsPersistence.PATH)));
+            assertEquals("", settings.getProperty(NativeProps.PACK_NAME));
+        }
     }
 
     @Test

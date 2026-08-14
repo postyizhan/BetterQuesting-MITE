@@ -39,6 +39,7 @@ public final class QuestSettingsPersistence {
             settings.readFromNBT(result.root());
         } else {
             settings.reset();
+            writesDisabled = result.outcome() == JsonDocumentStore.Outcome.QUARANTINED;
         }
         return result.outcome();
     }
@@ -53,7 +54,7 @@ public final class QuestSettingsPersistence {
         store.save(PATH, root, true);
     }
 
-    /** True only after a syntactically valid document carries an unsupported port revision. */
+    /** True after any quarantined document so later lifecycle callbacks preserve its bytes. */
     public boolean isWritesDisabled() {
         return writesDisabled;
     }

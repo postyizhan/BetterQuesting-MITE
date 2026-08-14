@@ -58,12 +58,9 @@ public final class JsonDocuments {
             if (cause instanceof IOException) {
                 throw (IOException) cause;
             }
-            throw new MalformedJsonDocumentException("Unable to read JSON document", ioFailure);
+            throw ioFailure;
         } catch (JsonSyntaxException syntaxFailure) {
             throw new MalformedJsonDocumentException("Malformed JSON document", syntaxFailure);
-        } catch (RuntimeException unexpected) {
-            // Gson 2.2.2 also surfaces JsonParseException and MalformedJsonException subclasses.
-            throw new MalformedJsonDocumentException("Malformed JSON document", unexpected);
         }
 
         if (parsed == null || !parsed.isJsonObject()) {

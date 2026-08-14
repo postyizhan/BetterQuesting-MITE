@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.postyizhan.betterquesting.api.util.NbtCompat;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
 import com.google.gson.stream.JsonWriter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -291,14 +292,14 @@ class DatabaseFixtureTest {
     @Test
     void deeplyNestedDocumentIsRejectedNotSilentlyAccepted() throws IOException {
         // Recording, not assuming: this captures whichever failure Gson 2.2.2 raises on deep nesting.
-        // parseObject only catches RuntimeException, so a StackOverflowError propagates raw and
-        // bypasses quarantine entirely, which is a real gap the observation documents.
+        // Gson may propagate StackOverflowError directly or wrap it in its non-syntax
+        // JsonParseException. Neither is malformed input, so parseObject must not quarantine it.
         Throwable thrown = assertThrows(Throwable.class,
             () -> parse(MalformedJsonFixtures.nestedObjects(MalformedJsonFixtures.OVERFLOWING_DEPTH)));
         record("deep overflow depth=" + MalformedJsonFixtures.OVERFLOWING_DEPTH
             + " threw=" + thrown.getClass().getName());
-        assertTrue(thrown instanceof StackOverflowError || thrown instanceof MalformedJsonDocumentException,
-            () -> "expected overflow or malformed rejection, got " + thrown.getClass().getName());
+        assertTrue(thrown instanceof StackOverflowError || thrown instanceof JsonParseException,
+            () -> "expected raw Gson overflow rejection, got " + thrown.getClass().getName());
 
         // A depth well inside the ceiling parses and round-trips cleanly, so the failure above is a
         // depth limit rather than a blanket refusal of nested data.
