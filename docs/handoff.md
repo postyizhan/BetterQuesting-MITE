@@ -257,7 +257,7 @@ accessible method net/minecraft/SaveHandler getWorldDirectory ()Ljava/io/File;
 
 提交 `feat: 持久化身份映射并建立自校验追加审计`。这是 §4.3 第 2 项。
 
-落地文件：`core/identity/` 下 `IdentityRecordCodec`、`IdentityRecordFields`、`IdentityRecordFormatException`、`FramedLines`、`IdentityAuditOperation`、`IdentityAuditRecord`、`IdentityAuditReport`、`IdentityRecordRejection`、`IdentityAuditLog`、`LegacyMappingStore`、`CorruptIdentityMappingException`、`PersistentPlayerIdentityService`；`core/storage/DirectoryWorldStorage`；`platform/fml/ServerIdentityContext`。`DeterministicPlayerIdentityService` 新增 `restoreMappings` 与 `requireDerivedIdentity`，`MiteWorldStorage` 改为委派 `DirectoryWorldStorage`，`CommonBootstrap` 接线 bind/unbind。
+落地文件：`core/identity/` 下 `IdentityRecordCodec`、`IdentityRecordFields`、`IdentityRecordFormatException`、`FramedLines`、`IdentityAuditOperation`、`IdentityAuditRecord`、`IdentityAuditReport`、`IdentityRecordRejection`、`IdentityAuditLog`、`LegacyMappingStore`、`CorruptIdentityMappingException`、`PersistentPlayerIdentityService`；`core/storage/DirectoryWorldStorage`；`platform/fml/ServerIdentityContext`。`DeterministicPlayerIdentityService` 新增 `restoreMappings` 与 `requireDerivedIdentity`，`MiteWorldStorage` 改为委派 `DirectoryWorldStorage`，`CommonBootstrap` 接线 bind/retire。
 
 **格式是纯文本自校验行，不用 JSON**，因此完全不碰 Gson 2.2.2 的限制。审计日志 `identity/IdentityAudit.log` 为 magic `BQIDAUDIT1` 加 10 个 `|` 分隔字段，末字段 CRC32；映射文件 `identity/LegacyIdentityMappings.txt` 为 `BQIDMAP1|<recordCount>|<crc32>` header 加逐条 `BQIDMAPREC1|...`，按 legacy UUID 排序以保证字节稳定。校验六道：字段数、magic、校验和、转义合法性、字段规范形式、重编码一致性。header 记录数校验是**整行删除唯一的检测手段**，逐行校验和查不出这种篡改。
 
@@ -280,7 +280,7 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 #### 已知未做
 
 - **写序缺口**：审计 append 先于快照 save。审计失败回滚内存；快照失败但审计已成功时内存已应用、审计有记录、磁盘陈旧，抛 `UncheckedIOException`，调用方吞掉即内存/磁盘分歧。选这个方向是因为反序会让崩溃窗口产生「无审计记录的已应用变更」。下一次成功 mutation 会整份重写快照，分歧可自愈。
-- **`ServerIdentityContext` 零自动化测试**，依赖 `MinecraftServer`，只有编译与人眼核对。RIC server-started listener 是否确实在 `loadAllWorlds` 之后触发**未经运行验证**。生命周期约束本身已核对成立：`bind` 先 `unbind` 再每次新建 `MiteWorldStorage`，`current(server)` 用 `boundServer != server` 引用比较拒绝跨世界复用。
+- **`ServerIdentityContext` 的纯 JVM 生命周期测试源码覆盖**：不同临时 world store、同 world 重启加载、`retire(A)` 后 `bind(B)` 的 clean rebind、matching-owner retirement、引用身份所有权、旧 owner 的 stale retire 与 bind 均不清除/替换新 binding、不同 owner 的损坏存储 bind 在加载前被拒且保留新 binding，以及同 owner 加载失败后保持 unbound。实际 `MinecraftServer` storage resolution、RIC server-started 是否确实在 `loadAllWorlds` 之后触发、world delete/unload 与 server stop callback 的运行顺序仍**未经 runtime smoke 验证**。
 - **header-only 且 `count=0` 的文件与合法空快照字节完全相同**，从新世界复制一个过来即可静默清空全部映射并绕过 CRC。reviewer 建议启动时按 sequence 重放审计得净效果与快照对账——这也是目前审计日志唯一能发挥作用之处，否则它是只写的。
 - CRC32 只防意外损坏与截断，**不防篡改**，对有文件写权限者无效。
 - 无并发测试。靠 `synchronized` 加 javadoc 声明主线程；`WorldStorage` 仍无按路径内部锁。
@@ -413,7 +413,7 @@ startup 只有在 source 可重新严格识别、prepared marker 与 source 重�
 
 身份映射已持久化、追加审计已有调用方（§4.2c），但该批次自身的残余风险见 §4.2c「已知未做」——其中**写序缺口**与 **header-only 文件可静默清空全部映射**两条最值得下一批次关注。
 
-仍然存在的：`MitePlayerIdentityAdapter` 尚未用真实 `EntityPlayer` 做测试；`ServerIdentityContext` 零自动化测试且 RIC server-started 触发时机未经运行验证；container GUI blocker 仍存在。
+仍然存在的：`MitePlayerIdentityAdapter` 尚未用真实 `EntityPlayer` 做测试；`ServerIdentityContext` 有纯 JVM 生命周期测试源码，但实际 `MinecraftServer` storage resolution、RIC server-started 排序和生命周期 callback 仍未经 runtime smoke 验证；container GUI blocker 仍存在。
 
 `WorldStorage` 的残余风险分两处：§4.2「已知未做」（无 readback 校验、生命周期绑定未接线、符号链接可绕过词法守卫、真实 Minecraft server/save handler 集成未运行验证、POSIX 权限未实测）与 §4.2b「已知未做」（无父目录 fsync、无故障注入测试、同路径并发无内部锁、Linux 异常映射未实测）。`MiteWorldStoragePathTest` 现已覆盖纯路径分流、production adapter 与 mapped overload 类型替身；§4.2 的「纯写侧接口」一条已由 §4.2b 解决。
 

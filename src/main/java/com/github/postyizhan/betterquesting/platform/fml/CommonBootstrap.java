@@ -265,17 +265,19 @@ public final class CommonBootstrap {
      * Binds the identity service after world load, which is the earliest point where the overworld
      * save handler can supply a world directory.
      *
-     * <p>Failures are logged and leave the context unbound rather than propagating. Throwing here
-     * would abort server start inside a third-party listener, and an unbound context already refuses
-     * to serve identities, so no caller can mistake a load failure for "no mappings exist".
+     * <p>Failures are logged and leave the caller without a binding rather than propagating.
+     * Throwing here would abort server start inside a third-party listener, and
+     * {@code current(server)} already refuses to serve identities for an unbound caller, so no
+     * caller can mistake a load failure for "no mappings exist".
      */
     private static void loadIdentityMappings(MinecraftServer server) {
         try {
             ServerIdentityContext.bind(server);
         } catch (IOException | RuntimeException failure) {
-            ServerIdentityContext.unbind();
+            ServerIdentityContext.retire(server);
             BetterQuestingMod.LOGGER.error(
-                "BetterQuesting identity mappings could not be loaded; identity-keyed features stay disabled",
+                "BetterQuesting identity mappings could not be loaded for this server; "
+                    + "its identity-keyed features stay disabled",
                 failure);
         }
     }
@@ -377,6 +379,9 @@ public final class CommonBootstrap {
     public static void onWorldSave(MinecraftServer server, boolean worldBeingDeleted) {
         if (server == null) {
             return;
+        }
+        if (worldBeingDeleted) {
+            ServerIdentityContext.retire(server);
         }
         saveQuestSettings(server, worldBeingDeleted);
         onQuestWorldSave(server, worldBeingDeleted);
@@ -744,7 +749,7 @@ public final class CommonBootstrap {
             }
         }
         onQuestLootServerStopping(server);
-        ServerIdentityContext.unbind();
+        ServerIdentityContext.retire(server);
     }
 
     static void onQuestServerStopping(Object server, boolean worldBeingDeleted) {
