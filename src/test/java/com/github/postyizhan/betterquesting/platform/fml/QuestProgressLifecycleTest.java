@@ -173,21 +173,95 @@ class QuestProgressLifecycleTest {
     }
 
     @Test
-    void blockedLegacyStartupDetachesSinkAndNeverWritesLater() throws IOException {
+    void failedStartupRebindsSinkOnRetryAndRepeatedSuccessStaysIdempotent() throws IOException {
+        QuestDatabase quests = database();
+        FailingLoadStorage storage = new FailingLoadStorage(dataDirectory);
+        QuestProgressLifecycle lifecycle = new QuestProgressLifecycle(storage, quests);
+
+        assertThrows(IOException.class, lifecycle::onServerStarted);
+        assertEquals(QuestProgressLifecycle.State.WRITE_DISABLED, lifecycle.state());
+
+        assertEquals(QuestProgressPersistence.LoadStatus.ABSENT, lifecycle.onServerStarted().status());
+        assertEquals(QuestProgressLifecycle.State.WRITABLE, lifecycle.state());
+        quests.get(QUEST).setComplete(ALICE, 30L);
+        assertEquals(Set.of(ALICE), lifecycle.dirtyPlayersSnapshot());
+        lifecycle.onWorldSave();
+        assertTrue(Files.exists(dataDirectory.resolve(QuestProgressPersistence.pathFor(ALICE))));
+
+        assertEquals(QuestProgressPersistence.LoadStatus.LOADED, lifecycle.onServerStarted().status());
+        quests.get(QUEST).setComplete(BOB, 31L);
+        assertEquals(Set.of(BOB), lifecycle.dirtyPlayersSnapshot());
+        lifecycle.onWorldSave();
+        assertTrue(Files.exists(dataDirectory.resolve(QuestProgressPersistence.pathFor(BOB))));
+    }
+
+    @Test
+    void blockedStartupReportRebindsSinkWhenRetrySucceeds() throws IOException {
+        Path legacy = dataDirectory.resolve(QuestProgressPersistence.LEGACY_PATH);
+        Files.writeString(legacy, "{\"mitePortFormat:8\":\"2\",\"questProgress:9\":{}}");
+        QuestDatabase quests = database();
+        QuestProgressLifecycle lifecycle = new QuestProgressLifecycle(
+            new DirectoryWorldStorage(dataDirectory), quests);
+
+        assertEquals(QuestProgressPersistence.LoadStatus.BLOCKED,
+            lifecycle.onServerStarted().status());
+        assertEquals(QuestProgressLifecycle.State.WRITE_DISABLED, lifecycle.state());
+        quests.get(QUEST).setComplete(ALICE, 29L);
+        assertTrue(lifecycle.dirtyPlayersSnapshot().isEmpty());
+
+        Files.delete(legacy);
+        assertEquals(QuestProgressPersistence.LoadStatus.ABSENT,
+            lifecycle.onServerStarted().status());
+        assertEquals(QuestProgressLifecycle.State.WRITABLE, lifecycle.state());
+        quests.get(QUEST).setComplete(ALICE, 30L);
+        assertEquals(Set.of(ALICE), lifecycle.dirtyPlayersSnapshot());
+
+        lifecycle.onWorldSave();
+        assertTrue(Files.exists(dataDirectory.resolve(QuestProgressPersistence.pathFor(ALICE))));
+    }
+
+    @Test
+    void emptyLegacyStartupMigratesAndKeepsWritesEnabled() throws IOException {
         Files.writeString(dataDirectory.resolve("QuestProgress.json"), "{\"questProgress:9\":{}}");
         QuestDatabase quests = database();
         QuestProgressLifecycle lifecycle = new QuestProgressLifecycle(
             new DirectoryWorldStorage(dataDirectory), quests);
 
-        assertEquals(QuestProgressPersistence.LoadStatus.BLOCKED, lifecycle.onServerStarted().status());
+        QuestProgressPersistence.LoadReport report = lifecycle.onServerStarted();
+        assertEquals(QuestProgressPersistence.LoadStatus.ABSENT, report.status());
+        assertEquals(QuestProgressPersistence.MigrationStatus.MIGRATED,
+            report.legacyMigration().orElseThrow().status());
         quests.get(QUEST).setComplete(ALICE, 31L);
         lifecycle.onWorldSave();
-        lifecycle.onServerStopping();
 
         assertTrue(lifecycle.dirtyPlayersSnapshot().isEmpty());
-        assertFalse(Files.exists(dataDirectory.resolve(QuestProgressPersistence.pathFor(ALICE))));
+        assertTrue(Files.exists(dataDirectory.resolve(QuestProgressPersistence.pathFor(ALICE))));
         assertEquals("{\"questProgress:9\":{}}",
             Files.readString(dataDirectory.resolve("QuestProgress.json")));
+    }
+
+    @Test
+    void completionOnlyLegacyStartupMigratesIntoWritableLifecycle() throws IOException {
+        String original = "{\"questProgress:9\":{\"0:10\":{"
+            + "\"questIDHigh:4\":0,\"questIDLow:4\":769,"
+            + "\"completed:9\":{\"0:10\":{\"uuid:8\":\"" + ALICE
+            + "\",\"timestamp:4\":31}},\"tasks:9\":{}}}}";
+        Files.writeString(dataDirectory.resolve("QuestProgress.json"), original);
+        QuestDatabase quests = database();
+        QuestProgressLifecycle lifecycle = new QuestProgressLifecycle(
+            new DirectoryWorldStorage(dataDirectory), quests);
+
+        QuestProgressPersistence.LoadReport report = lifecycle.onServerStarted();
+
+        assertEquals(QuestProgressPersistence.LoadStatus.LOADED, report.status());
+        assertEquals(QuestProgressLifecycle.State.WRITABLE, lifecycle.state());
+        assertTrue(quests.get(QUEST).isComplete(ALICE));
+        quests.get(QUEST).setComplete(BOB, 32L);
+        assertEquals(Set.of(BOB), lifecycle.dirtyPlayersSnapshot());
+        lifecycle.onWorldSave();
+        assertTrue(Files.exists(dataDirectory.resolve(QuestProgressPersistence.pathFor(ALICE))));
+        assertTrue(Files.exists(dataDirectory.resolve(QuestProgressPersistence.pathFor(BOB))));
+        assertEquals(original, Files.readString(dataDirectory.resolve("QuestProgress.json")));
     }
 
     @Test
@@ -399,6 +473,22 @@ class QuestProgressLifecycleTest {
             throws IOException {
             if (writesToFail-- > 0) throw new IOException("injected write failure");
             super.writeAtomically(path, writer, validator);
+        }
+    }
+
+    private static final class FailingLoadStorage extends FlushTrackingStorage {
+        private boolean fail = true;
+
+        private FailingLoadStorage(Path directory) {
+            super(directory);
+        }
+
+        @Override public List<String> list(String path, String suffix) throws IOException {
+            if (fail) {
+                fail = false;
+                throw new IOException("injected load failure");
+            }
+            return super.list(path, suffix);
         }
     }
 

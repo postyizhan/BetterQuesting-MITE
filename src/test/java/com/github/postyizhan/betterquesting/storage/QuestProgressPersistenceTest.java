@@ -539,6 +539,52 @@ class QuestProgressPersistenceTest {
     }
 
     @Test
+    void completionOnlyLegacyProgressMigratesLoadsAndPreservesExactSourceBackup() throws IOException {
+        byte[] original = completionOnlyLegacyDocument().getBytes(StandardCharsets.UTF_8);
+        Files.write(dataDirectory.resolve("QuestProgress.json"), original);
+
+        QuestProgressPersistence.LoadReport report = persistence.load();
+
+        assertEquals(QuestProgressPersistence.LoadStatus.LOADED, report.status());
+        assertEquals(List.of(ALICE, BOB), report.loadedPlayers());
+        QuestProgressPersistence.LegacyMigrationReport migration = report.legacyMigration().orElseThrow();
+        assertEquals(QuestProgressPersistence.MigrationStatus.MIGRATED, migration.status());
+        Path backup = migration.backupPath().orElseThrow();
+        assertTrue(migration.sourcePreserved());
+        assertArrayEquals(original, Files.readAllBytes(backup));
+        assertArrayEquals(original, Files.readAllBytes(dataDirectory.resolve("QuestProgress.json")));
+        assertTrue(quests.get(QUEST).isComplete(ALICE));
+        assertTrue(quests.get(QUEST).isComplete(BOB));
+        assertEquals(11L, quests.get(QUEST).getCompletionInfo(ALICE).getLong("timestamp"));
+        assertEquals("alice-extra", quests.get(QUEST).getCompletionInfo(ALICE).getString("opaque"));
+        String alice = Files.readString(playerPath(ALICE), StandardCharsets.UTF_8);
+        String bob = Files.readString(playerPath(BOB), StandardCharsets.UTF_8);
+        assertTrue(alice.contains(ALICE.toString()));
+        assertFalse(alice.contains(BOB.toString()));
+        assertTrue(alice.contains("alice-extra"));
+        assertTrue(bob.contains(BOB.toString()));
+        assertFalse(bob.contains(ALICE.toString()));
+    }
+
+    @Test
+    void legacyMigrationRefusesToOverwriteExistingSplitProgress() throws IOException {
+        byte[] legacy = completionOnlyLegacyDocument().getBytes(StandardCharsets.UTF_8);
+        byte[] existing = playerDocument(ALICE).getBytes(StandardCharsets.UTF_8);
+        Files.write(dataDirectory.resolve("QuestProgress.json"), legacy);
+        Files.createDirectories(dataDirectory.resolve("QuestProgress"));
+        Files.write(playerPath(ALICE), existing);
+
+        QuestProgressPersistence.LegacyMigrationReport report = persistence.migrateLegacy();
+
+        assertEquals(QuestProgressPersistence.MigrationStatus.BLOCKED, report.status());
+        assertTrue(report.issues().stream().anyMatch(issue -> issue.contains("already contains")));
+        assertArrayEquals(legacy, Files.readAllBytes(dataDirectory.resolve("QuestProgress.json")));
+        assertArrayEquals(existing, Files.readAllBytes(playerPath(ALICE)));
+        assertTrue(report.backupPath().isEmpty());
+        assertEquals(List.of("QuestProgress.json", QuestProgressPersistence.pathFor(ALICE)), fileTree());
+    }
+
+    @Test
     void startupAnalyzesLegacyWithoutCreatingBackupOnEveryRestart() throws IOException {
         byte[] original = Files.readAllBytes(fixture("legacy-quest-progress.json"));
         Files.write(dataDirectory.resolve("QuestProgress.json"), original);
@@ -605,7 +651,10 @@ class QuestProgressPersistenceTest {
 
     @Test
     void invalidLegacyIdentityIsBackedUpReportedAndNeverConverted() throws IOException {
-        String original = playerDocumentValue("not-a-uuid");
+        String original = "{\"questProgress:9\":{\"0:10\":{"
+            + "\"questIDHigh:4\":0,\"questIDLow:4\":257,"
+            + "\"completed:9\":{\"0:10\":{\"uuid:8\":\"not-a-uuid\"}},"
+            + "\"tasks:9\":{}}}}";
         Files.writeString(dataDirectory.resolve("QuestProgress.json"), original, StandardCharsets.UTF_8);
 
         QuestProgressPersistence.LegacyMigrationReport report = persistence.migrateLegacy();
@@ -619,6 +668,16 @@ class QuestProgressPersistenceTest {
 
     private String playerDocument(UUID uuid) {
         return playerDocumentValue(uuid.toString());
+    }
+
+    private String completionOnlyLegacyDocument() {
+        return "{\"questProgress:9\":{\"0:10\":{"
+            + "\"questIDHigh:4\":0,\"questIDLow:4\":257,"
+            + "\"completed:9\":{"
+            + "\"0:10\":{\"uuid:8\":\"" + ALICE + "\",\"timestamp:4\":11,"
+            + "\"opaque:8\":\"alice-extra\"},"
+            + "\"1:10\":{\"uuid:8\":\"" + BOB + "\",\"timestamp:4\":12}},"
+            + "\"tasks:9\":{}}}}";
     }
 
     private String playerDocumentValue(String uuid) {
@@ -711,4 +770,5 @@ class QuestProgressPersistenceTest {
         @Override public Optional<Path> backup(String path) throws IOException { return delegate.backup(path); }
         @Override public void flush() throws IOException { delegate.flush(); }
     }
+
 }

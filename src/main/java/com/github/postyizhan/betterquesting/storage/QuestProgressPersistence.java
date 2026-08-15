@@ -15,8 +15,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -34,29 +36,53 @@ public final class QuestProgressPersistence {
     private final JsonDocumentStore store;
     private final WorldStorage storage;
     private final NbtJsonCodec codec = new NbtJsonCodec();
+    private final LegacyQuestProgressImporter.MigrationIo migrationIo;
+    private final Map<UUID, LegacyQuestProgressImporter.ExpectedOutput> legacyManifestDirty =
+        new LinkedHashMap<>();
+    private boolean legacyMigrationActive;
 
     public QuestProgressPersistence(QuestDatabase quests, WorldStorage storage) {
-        this(quests, new JsonDocumentStore(storage), storage);
+        this(quests, new JsonDocumentStore(storage), storage,
+            new LegacyQuestProgressImporter.NioMigrationIo());
+    }
+
+    QuestProgressPersistence(QuestDatabase quests, WorldStorage storage,
+        LegacyQuestProgressImporter.MigrationIo migrationIo) {
+        this(quests, new JsonDocumentStore(storage), storage, migrationIo);
     }
 
     public QuestProgressPersistence(QuestDatabase quests, JsonDocumentStore store, WorldStorage storage) {
+        this(quests, store, storage, new LegacyQuestProgressImporter.NioMigrationIo());
+    }
+
+    private QuestProgressPersistence(QuestDatabase quests, JsonDocumentStore store,
+        WorldStorage storage, LegacyQuestProgressImporter.MigrationIo migrationIo) {
         this.quests = Objects.requireNonNull(quests, "quests");
         this.store = Objects.requireNonNull(store, "store");
         this.storage = Objects.requireNonNull(storage, "storage");
+        this.migrationIo = Objects.requireNonNull(migrationIo, "migrationIo");
     }
 
     /** Loads every canonical per-player file as one transaction. Legacy data is never auto-linked. */
     public synchronized LoadReport load() throws IOException {
         clearProgress();
-        if (storage.exists(LEGACY_PATH)) {
-            LegacyMigrationReport legacy = analyzeLegacy();
-            LoadStatus status = switch (legacy.status()) {
-                case QUARANTINED -> LoadStatus.QUARANTINED;
-                case OVERSIZED -> LoadStatus.OVERSIZED;
-                case BLOCKED -> LoadStatus.BLOCKED;
-                case ABSENT -> LoadStatus.ABSENT;
-            };
-            return new LoadReport(status, List.of(), legacy.issues(), Optional.of(legacy));
+        legacyMigrationActive = false;
+        legacyManifestDirty.clear();
+        Optional<LegacyMigrationReport> legacyMigration = Optional.empty();
+        LegacyMigrationReport legacy = migrateLegacy();
+        if (legacy.status() != MigrationStatus.ABSENT) {
+            legacyMigration = Optional.of(legacy);
+            if (legacy.status() != MigrationStatus.MIGRATED) {
+                LoadStatus status = switch (legacy.status()) {
+                    case QUARANTINED -> LoadStatus.QUARANTINED;
+                    case OVERSIZED -> LoadStatus.OVERSIZED;
+                    case BLOCKED -> LoadStatus.BLOCKED;
+                    case ABSENT -> LoadStatus.ABSENT;
+                    case MIGRATED -> throw new IllegalStateException("handled above");
+                };
+                return new LoadReport(status, List.of(), legacy.issues(), legacyMigration);
+            }
+            legacyMigrationActive = true;
         }
 
         List<String> files = new ArrayList<>(storage.list(DIRECTORY, ".json"));
@@ -98,7 +124,7 @@ public final class QuestProgressPersistence {
             LoadStatus status = oversized ? LoadStatus.OVERSIZED
                 : invalid ? LoadStatus.QUARANTINED : blocked ? LoadStatus.BLOCKED : LoadStatus.QUARANTINED;
             return new LoadReport(status,
-                List.of(), List.copyOf(issues));
+                List.of(), List.copyOf(issues), legacyMigration);
         }
 
         NBTTagList snapshot = quests.writeProgressToNBT(new NBTTagList(), null);
@@ -112,7 +138,7 @@ public final class QuestProgressPersistence {
         }
         List<UUID> loaded = staged.stream().map(StagedPlayer::uuid).toList();
         return new LoadReport(loaded.isEmpty() ? LoadStatus.ABSENT : LoadStatus.LOADED,
-            loaded, List.of());
+            loaded, List.of(), legacyMigration);
     }
 
     /** Saves exactly one player's progress using the upstream root shape and canonical UUID path. */
@@ -144,12 +170,36 @@ public final class QuestProgressPersistence {
         if (validation.status() != ValidationStatus.ACCEPTED) {
             throw new IOException("Refusing unsafe player progress snapshot: " + validation.issue());
         }
+        LegacyQuestProgressImporter importer = null;
+        LegacyQuestProgressImporter.ExpectedOutput intendedOutput = null;
+        if (legacyMigrationActive) {
+            importer = legacyImporter();
+            importer.requireRefreshableState(legacyManifestDirty);
+            intendedOutput = importer.expectedOutput(root);
+        }
         store.save(pathFor(uuid), root, true);
+        if (importer != null) {
+            legacyManifestDirty.put(uuid, intendedOutput);
+            importer.refreshCompleteMarker(legacyManifestDirty);
+            legacyManifestDirty.clear();
+        }
     }
 
     public synchronized boolean deletePlayer(UUID uuid) throws IOException {
         Objects.requireNonNull(uuid, "uuid");
-        return storage.delete(pathFor(uuid));
+        LegacyQuestProgressImporter importer = null;
+        if (legacyMigrationActive) {
+            importer = legacyImporter();
+            importer.requireRefreshableState(legacyManifestDirty);
+        }
+        boolean deleted = storage.delete(pathFor(uuid));
+        if (deleted) legacyManifestDirty.put(uuid,
+            LegacyQuestProgressImporter.deletedOutput());
+        if (importer != null && !legacyManifestDirty.isEmpty()) {
+            importer.refreshCompleteMarker(legacyManifestDirty);
+            legacyManifestDirty.clear();
+        }
+        return deleted;
     }
 
     /** Clears only progress, retaining the quest definitions for the next world/session. */
@@ -161,57 +211,43 @@ public final class QuestProgressPersistence {
         }
     }
 
-    /**
-     * Analyzes legacy progress and deliberately returns BLOCKED: current APIs cannot prove task
-     * ownership for every record, so writing a split file would risk cross-linking a player.
-     */
+    /** Converts completion-only legacy data while retaining UUIDs exactly as stored. */
     public synchronized LegacyMigrationReport migrateLegacy() throws IOException {
-        if (!storage.exists(LEGACY_PATH)) {
-            return new LegacyMigrationReport(MigrationStatus.ABSENT, List.of(), Optional.empty(),
-                true, List.of());
-        }
-        return analyzeLegacy(Optional.empty());
+        return importLegacy(true);
     }
 
     /** Parses and reports legacy data without attempting conversion or creating a timestamped backup. */
     public synchronized LegacyMigrationReport analyzeLegacy() throws IOException {
-        if (!storage.exists(LEGACY_PATH)) {
+        return importLegacy(false);
+    }
+
+    private LegacyMigrationReport importLegacy(boolean migrate) throws IOException {
+        java.nio.file.Path root = storage.getDataDirectory().orElse(null);
+        if (root == null) {
             return new LegacyMigrationReport(MigrationStatus.ABSENT, List.of(), Optional.empty(),
                 true, List.of());
         }
-        return analyzeLegacy(Optional.empty());
+        LegacyQuestProgressImporter.Result result = legacyImporter(root).run(migrate);
+        MigrationStatus status = switch (result.status()) {
+            case ABSENT -> MigrationStatus.ABSENT;
+            case MIGRATED -> MigrationStatus.MIGRATED;
+            case BLOCKED -> MigrationStatus.BLOCKED;
+            case QUARANTINED -> MigrationStatus.QUARANTINED;
+            case OVERSIZED -> MigrationStatus.OVERSIZED;
+        };
+        if (migrate && status == MigrationStatus.MIGRATED) legacyMigrationActive = true;
+        return new LegacyMigrationReport(status, result.users(), result.backupPath(), true,
+            result.issues());
     }
 
-    private LegacyMigrationReport analyzeLegacy(Optional<java.nio.file.Path> backup) throws IOException {
-        ReadResult read = readDocument(LEGACY_PATH);
-        if (!read.loaded()) {
-            MigrationStatus status = read.oversized() ? MigrationStatus.OVERSIZED : MigrationStatus.QUARANTINED;
-            return new LegacyMigrationReport(status, List.of(), backup,
-                true, List.of(read.issue()));
-        }
-        ValidationResult validation = validateProgressRoot(read.root());
-        if (validation.status() == ValidationStatus.BLOCKED) {
-            return new LegacyMigrationReport(MigrationStatus.BLOCKED, List.of(), backup,
-                true, List.of(validation.issue()));
-        }
-        UserScan users = scanUsers(read.root());
-        if (validation.status() == ValidationStatus.INVALID) {
-            quarantine(LEGACY_PATH);
-            List<String> issues = new ArrayList<>();
-            issues.add(validation.issue());
-            issues.addAll(users.issues());
-            return new LegacyMigrationReport(MigrationStatus.QUARANTINED, users.users(), backup,
-                true, issues);
-        }
-        if (!users.issues().isEmpty()) {
-            quarantine(LEGACY_PATH);
-            return new LegacyMigrationReport(MigrationStatus.QUARANTINED, users.users(), backup,
-                true, users.issues());
-        }
-        List<String> issues = new ArrayList<>(users.issues());
-        issues.add("task progress ownership is not independently recoverable from existing APIs; explicit per-record mapping and a staged importer are required");
-        return new LegacyMigrationReport(MigrationStatus.BLOCKED, users.users(), backup,
-            true, issues);
+    private LegacyQuestProgressImporter legacyImporter() throws IOException {
+        java.nio.file.Path root = storage.getDataDirectory()
+            .orElseThrow(() -> new IOException("BetterQuesting data directory is unavailable"));
+        return legacyImporter(root);
+    }
+
+    private LegacyQuestProgressImporter legacyImporter(java.nio.file.Path root) {
+        return new LegacyQuestProgressImporter(root, quests, codec, migrationIo);
     }
 
     public static String pathFor(UUID uuid) {
@@ -477,7 +513,7 @@ public final class QuestProgressPersistence {
         }
     }
 
-    public enum MigrationStatus { ABSENT, BLOCKED, QUARANTINED, OVERSIZED }
+    public enum MigrationStatus { ABSENT, MIGRATED, BLOCKED, QUARANTINED, OVERSIZED }
 
     public record LegacyMigrationReport(MigrationStatus status, List<UUID> discoveredUuids,
                                         Optional<java.nio.file.Path> backupPath,

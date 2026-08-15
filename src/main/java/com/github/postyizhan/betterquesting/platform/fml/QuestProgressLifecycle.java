@@ -47,7 +47,7 @@ public final class QuestProgressLifecycle implements DirtyPlayerSink {
             stopCallbackPending = false;
             progressWritesEnabled = report.status() == QuestProgressPersistence.LoadStatus.ABSENT
                 || report.status() == QuestProgressPersistence.LoadStatus.LOADED;
-            if (!progressWritesEnabled) quests.setDirtyPlayerSink(DirtyPlayerSink.NO_OP);
+            quests.setDirtyPlayerSink(progressWritesEnabled ? this : DirtyPlayerSink.NO_OP);
             return report;
         } catch (IOException | RuntimeException failure) {
             discardWorldState();

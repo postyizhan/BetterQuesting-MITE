@@ -174,10 +174,16 @@ public final class CommonBootstrap {
             questProgressLifecycle = lifecycle;
             questProgressWritesBlocked = lifecycle.state() == QuestProgressLifecycle.State.WRITE_DISABLED;
             switch (report.status()) {
-                case LOADED -> BetterQuestingMod.LOGGER.info(
-                    "Loaded BetterQuesting progress for {} explicit UUID players", report.loadedPlayers().size());
-                case ABSENT -> BetterQuestingMod.LOGGER.info(
-                    "BetterQuesting QuestProgress directory absent; using empty progress");
+                case LOADED -> {
+                    BetterQuestingMod.LOGGER.info(
+                        "Loaded BetterQuesting progress for {} explicit UUID players", report.loadedPlayers().size());
+                    logLegacyProgressMigration(report);
+                }
+                case ABSENT -> {
+                    BetterQuestingMod.LOGGER.info(
+                        "BetterQuesting QuestProgress directory absent; using empty progress");
+                    logLegacyProgressMigration(report);
+                }
                 case QUARANTINED -> BetterQuestingMod.LOGGER.warn(
                     "BetterQuesting per-player progress was rejected without a partial merge: {}",
                     report.issues());
@@ -197,6 +203,16 @@ public final class CommonBootstrap {
             BetterQuestingMod.LOGGER.error(
                 "BetterQuesting player progress could not be loaded; progress remains empty", failure);
         }
+    }
+
+    private static void logLegacyProgressMigration(QuestProgressPersistence.LoadReport report) {
+        report.legacyMigration()
+            .filter(migration -> migration.status() == QuestProgressPersistence.MigrationStatus.MIGRATED)
+            .ifPresent(migration -> BetterQuestingMod.LOGGER.warn(
+                "Migrated completion-only QuestProgress.json into {} UUID files; exact source backup: {}. "
+                    + "The original is retained and ignored only while all migration digests validate; "
+                    + "legacy UUIDs were retained without automatic identity mapping",
+                migration.discoveredUuids().size(), migration.backupPath().orElseThrow()));
     }
 
     /**

@@ -338,7 +338,7 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 
 #### 已知未做
 
-- **无生产调用方**：`JsonDocumentStore`/`JsonSchemaFields` 尚无调用点，`SaveLoadHandler` 等价物和 `LegacyQuestImporter` 仍未做。`stamp(root, build)` 的 build 串靠参数传入，因为还没有解析 mod 版本的途径（上游用 `Loader.instance().activeModContainer().getVersion()`，需要 FML 侧 supplier）。B3 golden fixture 已在 §4.2f 建立；把 codec 接到数据库读写路径仍属于 B4。
+- **生产接线状态**：`JsonDocumentStore`/`JsonSchemaFields` 已由 B4.1-B4.6 接入各数据库生命周期；严格 completion-only 的旧 `QuestProgress.json` copy migration 也已接入生产启动路径并永久保留原件，见 §4.3。带 task progress 或无法证明无损的数据仍会 fail closed，完整 task-bearing 迁移语义尚未实现。`stamp(root, build)` 的 build 串仍靠参数传入，因为还没有解析 mod 版本的途径（上游用 `Loader.instance().activeModContainer().getVersion()`，需要 FML 侧 supplier）。
 - **从未用真实上游 1.7.10 世界写出的 `QuestDatabase.json` 验证过**。往返只在自产文档上证明，格式规则逐条对着上游行号复刻。这是唯一能闭合兼容性声明的检查，缺 1.7.10 世界做不了。
 - `format=false` 下 byte[] 与 int[] 真正不可区分，都降级为 long list。
 - quarantine 是 copy 而非 move（与上游一致），重复失败会覆盖上一份隔离副本；且用 `writeAtomically` 复制会整文件进内存。
@@ -370,12 +370,30 @@ streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无
 流体一类不可跳过，已核实：上游存在 `bq_standard/tasks/TaskFluid.java`、`api/placeholders/FluidPlaceholder.java`、`api/questing/tasks/IFluidTask.java`，共 17 个文件引用 `FluidStack`/`FluidRegistry`，所以**真实上游存档里可能带流体任务数据**。序列化形状（`TaskFluid.java:70-81`）：`requiredFluids` 是 compound 列表，每项由 Forge `FluidStack.writeToNBT` 写出（`FluidName` 字符串 + `Amount` int + 可选 `Tag` compound），同层还有 `ignoreNBT`/`consume`/`groupDetect`/`autoConsume` 四个 boolean；进度侧 `data` 是 TAG_INT 列表（`:124`）。`FluidStack` 是 Forge 类型而 MITE 无 Forge，故阶段 3 对流体只能**不透明保留 + placeholder + 迁移报告**（对应 `plan.md` 工作项 9），不得静默替换成其他物品，语义解析留待后续阶段。
 
 **探针方法警告**：不要用 `unzip -l 1.6.4-MITE.jar | grep -i fluid` 之类按名字搜 jar 来判断平台是否支持某概念。该 jar 是**混淆**的（条目形如 `a.class`/`aa.class`/`aaa.class`，7208 个文件），任何可读类名都搜不到，零命中不构成"不存在"的证据。同样的坑先前在 `NBTTagCompound` 上踩过一次，见 §5.2 与记忆条目。
-6. 实现 `LegacyQuestImporter`；旧 `QuestProgress.json` 转换为逐玩家文件后必须保留原件。
+6. ~~实现 `LegacyQuestImporter`；旧 `QuestProgress.json` 转换为逐玩家文件后必须保留原件。~~ 已完成；实现为 `LegacyQuestProgressImporter` 的 completion-only copy migration，原件永不删除，协议和限制见下文。
 7. 周期 autosave、world save、server stop 均触发 flush；server stop 必须等待待处理 I/O 完成。
 8. 目标平台缺失物品、实体、维度等内容时生成 placeholder 和迁移报告，不得静默替换成其他内容。
 9. 最后接回 `NameCache`/`QuestCache`；`IQuestSettings.canUserEdit` 随 `NameCache` 后续处理，不能遗漏或让网络/GUI 假设权限检查已存在。
 
 `QuestLoot.json` 在阶段 3 **只做识别、备份/损坏证据留存和不透明保留**；语义解析仍属于阶段 7 的 LootRegistry。B4.6 的存储威胁模型与本 mod 其余基于路径的 world persistence 一致：宿主进程和本地用户受信任。操作开始时已经存在的意外 symlink/reparse point、非常规 source、恶意文件 bytes、截断、超限、深度攻击、普通 I/O 失败、命名碰撞和部分写入属于范围内；恶意本地参与者在操作期间并发替换父目录、junction 或预留文件不属于范围内。实现不会也不得声称父路径遍历 race-free。
+
+#### `QuestProgress.json` completion-only copy migration（已完成）
+
+迁移入口在 progress load 之前运行，但 quest database 必须已经加载；现有启动顺序仍是 `loadQuestDatabases` 后 `loadQuestProgress`。world save 与 server stop 仍先落 progress 再落 database，未改变两处顺序约束。legacy UUID 原样保留，不做用户名、在线身份或 identity mapping 推断。
+
+识别先从 canonical BetterQuesting data root 直接捕获最多 8 MiB + 1 byte 的 source，要求 root/source/既有 marker/backup/output directory/output 都是 non-symlink、non-reparse 的预期类型，并在操作开始时验证 canonical containment。捕获前后复验 source/root identity。bytes 使用 REPORT 模式严格 UTF-8 decode，再由 strict `JsonReader` 做最大 128 层的结构解析；comments、单引号、unquoted token、trailing comma、重复 raw member、typed-key conflict、非连续 list index、非 canonical number，以及 string value/member name 中的 unpaired UTF-16 surrogate 都在 NBT 转换前拒绝；合法 surrogate pair 保留。legacy 根必须没有 canonical `mitePortFormat`，且只能有 `questProgress:9`；每条 quest 只能有一个 `questID:3` 或完整 `questIDHigh:4` + `questIDLow:4`、必需的 `completed:9` 和 `tasks:9`。current/future canonical `mitePortFormat:8` 保持 `BLOCKED`，不进入 legacy 分支。
+
+自动转换只接受 tasks 为空且每条 quest 至少有一个 canonical UUID completion owner 的记录。重复 quest ID、同 quest 重复 completion UUID、case-variant UUID、dual quest ID、unknown quest、越界/非 integral 数值均拒绝。root/quest 层任何 opaque 字段以及 empty completion quest 都无法证明归属，故 `BLOCKED`；不会把它们复制给所有玩家。completion 内的 owned opaque 字段只有在其完整 typed NBT 形状可无损转换时才保留；byte/short/int/long、string、compound、formatted list、byte[] 和 int[] 有逐值范围检查，float/double 因不能证明十进制 JSON 到 binary NBT 的精确性而拒绝。已验证的 legacy numeric quest ID 会先用当前 `QuestDatabase` 已知映射解析，再只写 `questIDHigh:4`/`questIDLow:4`，生成文件不残留冲突的 `questID:3`。初次迁移最多生成 4096 个 player files、总计 64 MiB，marker 最多 1 MiB；每个 planned player document 先在 8 MiB bounded buffer 中完整序列化，等于 8 MiB 可发布，多 1 byte 即在创建 backup/output/marker 前 fail closed。
+
+固定 artifact 位于同一 data root：原件 `QuestProgress.json` 永久保留；exact-byte backup 为 `QuestProgress.json.legacy-migration.bak`；immutable prepared marker 为 `QuestProgress.legacy-migration.prepared`；current complete marker 为 `QuestProgress.legacy-migration.complete`；live split outputs 位于 `QuestProgress/<canonical-uuid>.json`。prepared marker 记录 source/backup digest 和初始 split plan，写入 temp 后 file fsync，再要求同文件系统 `ATOMIC_MOVE` 发布，最后在 provider 支持时 parent-directory fsync；不支持 atomic marker move 时迁移失败，不做 non-atomic fallback。backup 和每个 output 以 `CREATE_NEW` 写入、file fsync、parent-directory fsync；complete marker 最后用同样协议发布。这里仅声称 marker publication 使用 provider 明确支持的 atomic move，不声称多文件事务本身原子。
+
+startup 只有在 source 可重新严格识别、prepared marker 与 source 重建的初始 plan 完全一致、backup 与 source digest 一致、complete marker 与**当前每个 live output** 的 path/size/SHA-256 完全一致时才忽略保留的 source。complete 缺 prepared、marker/source/backup/output 缺失或不匹配、unexpected output、symlink/reparse/non-regular path 都 fail closed。仅有 valid prepared marker 的 partial transaction 会在 startup 恢复：exact artifact 复用，缺失或 digest 不符的 transaction-owned partial artifact 从仍验证通过的 source 重建，然后发布 complete。ordinary failure 尝试逆序清理；第一次 cleanup delete/sync 失败即停止删除更早的 recovery dependencies，suppressed exception 与 prepared marker/backup/source/尚存 outputs 一起保留。若 complete marker 的 rollback delete 失败，则不再删除它依赖的 outputs/backup；restart 要么完整验证该 complete state，要么确定性 fail closed。若断电只留下尚未发布的 prepared temp，无法证明该 collision 属于本次事务，startup 有意 `BLOCKED`，不自动删除。
+
+迁移完成后的正常 player save/delete 在无 dirty window 时复验 source/prepared/backup/current complete 与全部现有 output digest。写前先 bounded-serialize 并记录本 lifecycle 准备发布的 player digest；写后刷新会 canonical-parse 旧 complete marker，把每个 non-dirty live output 与旧 manifest 比较，并要求每个 dirty output 精确等于本 lifecycle 已知 save digest 或已知 delete。refresh 失败后的 retry 仍执行同一比较，故不能顺带认可其他玩家的外部修改、删除或新增；随后才 sync `QuestProgress/`，并以 file fsync + required atomic replace + root-directory sync 刷新 current complete marker。因此后续 restart 仍逐 output 验 digest。若进程在 live file 已变更而 complete marker 尚未刷新时终止，startup 有意 fail closed，不把无法区分的合法更新与篡改自动归类；只有同一仍存活 lifecycle 持有上述 known dirty state，才能安全 retry。原件和 exact backup 始终存在，故该窗口不丢 legacy source，但 lifecycle 消失后可能需要管理员确认。
+
+运行证据仅覆盖 macOS + Java 17 default provider。directory fsync 在 Windows 分支跳过，在其他 provider 只忽略明确的 `UnsupportedOperationException`；Windows/junction 行为未做运行测试。trusted-local-host 模型与 QuestLoot 相同：操作期间恶意本地并发替换路径不在范围内，也不声称 race-free containment。SHA-256 marker 是完整性/状态一致性校验而非针对受信任本地管理员的认证，未使用 secret 或 MAC。
+
+#### `QuestLoot.json` opaque recognition（已完成）
 
 生产路径使用 Windows/macOS 默认 Java provider 均提供的普通 NIO API：立即把非符号链接 world root 解析为 canonical root，确认固定的直接子项 `QuestLoot.json` 仍受该 root 包含，以 `NOFOLLOW_LINKS` 读取属性并只接受 regular file。source channel 优先以 `READ + NOFOLLOW_LINKS` 打开；provider 不支持该 open option 时才退回 `READ`，并在打开前后按上述 trusted-local-host 模型复验 source/root identity。B4.6 的这套实际路径实现只在 macOS/Java 17 上做过运行测试；Windows 分支只使用可移植 API 并保留 provider fallback，但本轮未在 Windows 上运行，不能把旧的 Windows 追加写探针当成这条路径的运行证据。每次 lifecycle/start 只捕获一次 immutable bytes，最多读取 8 MiB + 1 byte；严格 UTF-8 decode 后，深度上限 128 的保守预检在进入 Gson 2.2.2 前识别双/单引号、三种 lenient comment。token 边界逐项对齐 Gson 2.2.2：`nextNonWhitespace` 只跳过 ASCII tab/LF/CR/space，unquoted literal 另把 form feed 当 delimiter；U+2003 等非 ASCII whitespace 仍属于 unquoted token，因此其后的 quote/backslash 会在 Gson 递归前按歧义 token 拒绝。正确引用字符串内的普通 Unicode 仍有效。
 
