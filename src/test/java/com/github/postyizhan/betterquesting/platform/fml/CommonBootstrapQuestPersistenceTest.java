@@ -198,6 +198,38 @@ class CommonBootstrapQuestPersistenceTest {
         assertTrue(fixture.questLines().isEmpty());
     }
 
+    @Test
+    void failedQuestDatabaseSessionIgnoresMismatchedCleanupAndRebindsCleanly() throws IOException {
+        Files.writeString(dataDirectory.resolve("QuestDatabase.json"),
+            "{\"questDatabase:9\":{},\"questLines:9\":{},\"mitePortFormat:8\":\"2\"}");
+        QuestDatabase firstQuests = new QuestDatabase();
+        QuestLineDatabase firstLines = new QuestLineDatabase();
+        QuestDatabaseLifecycle failedDatabase = new QuestDatabaseLifecycle(
+            new DirectoryWorldStorage(dataDirectory), firstQuests, firstLines, "test");
+        assertEquals(com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore.Outcome.QUARANTINED,
+            failedDatabase.onServerStarted());
+        CommonBootstrap.bindQuestLifecycles(owner, failedDatabase, null);
+        firstQuests.createNew(DELETED_QUEST);
+
+        Object otherOwner = new Object();
+        CommonBootstrap.onQuestWorldSave(otherOwner, true);
+        CommonBootstrap.onQuestWorldSave(owner, false);
+        assertTrue(firstQuests.isEmpty());
+
+        QuestDatabase secondQuests = new QuestDatabase();
+        QuestLineDatabase secondLines = new QuestLineDatabase();
+        QuestDatabaseLifecycle secondDatabase = new QuestDatabaseLifecycle(
+            new DirectoryWorldStorage(dataDirectory.resolveSibling(dataDirectory.getFileName() + "-second")),
+            secondQuests, secondLines, "test");
+        secondDatabase.onServerStarted();
+        CommonBootstrap.bindQuestLifecycles(otherOwner, secondDatabase, null);
+        secondQuests.createNew(RETAINED_QUEST);
+        CommonBootstrap.onQuestWorldSave(owner, true);
+        assertTrue(secondQuests.containsKey(RETAINED_QUEST));
+        CommonBootstrap.onQuestWorldSave(otherOwner, true);
+        assertTrue(secondQuests.isEmpty());
+    }
+
     private Fixture start(TrackingStorage storage) throws IOException {
         Fixture fixture = loadUnbound(storage);
         CommonBootstrap.bindQuestLifecycles(owner, fixture.database(), fixture.progress());

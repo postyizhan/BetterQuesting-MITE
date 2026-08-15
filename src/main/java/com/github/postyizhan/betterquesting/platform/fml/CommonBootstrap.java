@@ -13,6 +13,7 @@ import com.github.postyizhan.betterquesting.storage.NameCache;
 import com.github.postyizhan.betterquesting.storage.QuestLootPersistence;
 import com.github.postyizhan.betterquesting.storage.QuestProgressPersistence;
 import com.github.postyizhan.betterquesting.storage.QuestSettings;
+import com.github.postyizhan.betterquesting.storage.migration.MigrationReport;
 import java.io.IOException;
 import java.util.Objects;
 import moddedmite.rustedironcore.api.event.Handlers;
@@ -26,6 +27,8 @@ public final class CommonBootstrap {
     private static QuestSettingsLifecycle questSettingsLifecycle;
     private static Object questDatabaseServer;
     private static QuestDatabaseLifecycle questDatabaseLifecycle;
+    private static Object questDatabaseFailedServer;
+    private static QuestDatabaseLifecycle questDatabaseFailedLifecycle;
     private static boolean questDatabaseStopPending;
     private static boolean questProgressWritesBlocked;
     private static Object questProgressServer;
@@ -128,6 +131,14 @@ public final class CommonBootstrap {
     }
 
     private static void loadQuestDatabases(MinecraftServer server) {
+        if (server == questDatabaseFailedServer) {
+            QuestDatabase.INSTANCE.clear();
+            QuestLineDatabase.INSTANCE.clear();
+            questProgressWritesBlocked = true;
+            BetterQuestingMod.LOGGER.warn(
+                "BetterQuesting QuestDatabase.json remains blocked for this server session");
+            return;
+        }
         try {
             MiteWorldStorage storage = MiteWorldStorage.resolve(server);
             if (!storage.isAvailable()) {
@@ -136,23 +147,58 @@ public final class CommonBootstrap {
             }
             QuestDatabaseLifecycle lifecycle = new QuestDatabaseLifecycle(
                 storage, QuestDatabase.INSTANCE, QuestLineDatabase.INSTANCE, currentBuild());
-            lifecycle.onServerStarted();
+            questDatabaseFailedLifecycle = lifecycle;
+            JsonDocumentStore.Outcome outcome = lifecycle.onServerStarted();
+            logMigrationReport(lifecycle.lastMigrationReport());
+            if (outcome == JsonDocumentStore.Outcome.QUARANTINED) {
+                questDatabaseFailedServer = server;
+                questDatabaseServer = null;
+                questDatabaseLifecycle = null;
+                questDatabaseStopPending = false;
+                questProgressWritesBlocked = true;
+                BetterQuestingMod.LOGGER.error(
+                    "BetterQuesting QuestDatabase.json was rejected; quest database writes remain disabled for this server session");
+                return;
+            }
             questDatabaseServer = server;
             questDatabaseLifecycle = lifecycle;
+            questDatabaseFailedServer = null;
+            questDatabaseFailedLifecycle = null;
             questDatabaseStopPending = false;
             questProgressWritesBlocked = false;
             BetterQuestingMod.LOGGER.info("Loaded BetterQuesting QuestDatabase.json");
         } catch (IOException | RuntimeException failure) {
             questDatabaseServer = null;
             questDatabaseLifecycle = null;
+            questDatabaseFailedServer = server;
             questDatabaseStopPending = false;
-            questProgressWritesBlocked = false;
+            questProgressWritesBlocked = true;
             QuestDatabase.INSTANCE.clear();
             QuestLineDatabase.INSTANCE.clear();
             BetterQuestingMod.LOGGER.error(
                 "BetterQuesting QuestDatabase.json could not be loaded; quest databases remain empty",
                 failure);
         }
+    }
+
+    private static void logMigrationReport(java.util.Optional<MigrationReport.Update> report) {
+        report.ifPresent(update -> {
+            switch (update.status()) {
+                case RECORDED -> BetterQuestingMod.LOGGER.warn(
+                    "Preserved {} unresolved task factories as opaque task placeholders; recorded {} new "
+                        + "occurrences in {}",
+                    update.observed(), update.added(), MigrationReport.PATH);
+                case UNCHANGED -> BetterQuestingMod.LOGGER.warn(
+                    "Preserved {} unresolved task factories as opaque task placeholders; all occurrences "
+                        + "are already recorded in {}",
+                    update.observed(), MigrationReport.PATH);
+                case BLOCKED -> BetterQuestingMod.LOGGER.error(
+                    "Preserved {} unresolved task factories as opaque task placeholders, but {} could not "
+                        + "be updated because its existing contents are unsupported; quarantine copy: {}",
+                    update.observed(), MigrationReport.PATH,
+                    update.quarantinePath().orElse("unavailable"));
+            }
+        });
     }
 
     private static void loadQuestProgress(MinecraftServer server) {
@@ -405,16 +451,29 @@ public final class CommonBootstrap {
 
     static void bindQuestLifecycles(Object owner, QuestDatabaseLifecycle database,
         QuestProgressLifecycle progress) {
-        questDatabaseServer = owner;
-        questDatabaseLifecycle = database;
+        if (database != null && database.isWritesDisabled()) {
+            questDatabaseServer = null;
+            questDatabaseLifecycle = null;
+            questDatabaseFailedServer = owner;
+            questDatabaseFailedLifecycle = database;
+        } else {
+            questDatabaseServer = owner;
+            questDatabaseLifecycle = database;
+            questDatabaseFailedServer = null;
+            questDatabaseFailedLifecycle = null;
+        }
         questDatabaseStopPending = false;
         questProgressServer = owner;
         questProgressLifecycle = progress;
-        questProgressWritesBlocked = progress != null
-            && progress.state() == QuestProgressLifecycle.State.WRITE_DISABLED;
+        questProgressWritesBlocked = (database != null && database.isWritesDisabled())
+            || (progress != null && progress.state() == QuestProgressLifecycle.State.WRITE_DISABLED);
     }
 
     static void onQuestWorldSave(Object owner, boolean worldBeingDeleted) {
+        if (!worldBeingDeleted && owner == questDatabaseFailedServer) {
+            discardFailedQuestDatabases(owner);
+            return;
+        }
         if (worldBeingDeleted) {
             retireQuestLifecycles(owner);
             return;
@@ -506,10 +565,35 @@ public final class CommonBootstrap {
     }
 
     private static void retireQuestLifecycles(Object owner) {
-        if (owner != questProgressServer && owner != questDatabaseServer) return;
+        if (owner != questProgressServer && owner != questDatabaseServer
+            && owner != questDatabaseFailedServer) return;
         saveQuestProgress(owner, true);
         saveQuestDatabases(owner, true);
+        endFailedQuestDatabaseSession(owner);
         questDatabaseStopPending = false;
+        questProgressWritesBlocked = false;
+    }
+
+    private static void discardFailedQuestDatabases(Object owner) {
+        if (owner != questDatabaseFailedServer) return;
+        try {
+            if (questDatabaseFailedLifecycle != null) {
+                questDatabaseFailedLifecycle.onWorldSave(true);
+            }
+        } catch (IOException | RuntimeException failure) {
+            BetterQuestingMod.LOGGER.error(
+                "BetterQuesting failed QuestDatabase lifecycle could not be discarded", failure);
+        } finally {
+            QuestDatabase.INSTANCE.clear();
+            QuestLineDatabase.INSTANCE.clear();
+        }
+    }
+
+    private static void endFailedQuestDatabaseSession(Object owner) {
+        if (owner != questDatabaseFailedServer) return;
+        discardFailedQuestDatabases(owner);
+        questDatabaseFailedServer = null;
+        questDatabaseFailedLifecycle = null;
         questProgressWritesBlocked = false;
     }
 
@@ -698,6 +782,7 @@ public final class CommonBootstrap {
         } else {
             finishQuestDatabaseStop(server, true);
         }
+        endFailedQuestDatabaseSession(server);
     }
 
     private static void finishQuestDatabaseStop(Object server) {

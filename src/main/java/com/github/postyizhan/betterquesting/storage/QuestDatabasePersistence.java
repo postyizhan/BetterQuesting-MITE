@@ -5,8 +5,10 @@ import com.github.postyizhan.betterquesting.core.storage.json.JsonSchemaFields;
 import com.github.postyizhan.betterquesting.api.util.NbtCompat;
 import com.github.postyizhan.betterquesting.questing.QuestDatabase;
 import com.github.postyizhan.betterquesting.questing.QuestLineDatabase;
+import com.github.postyizhan.betterquesting.storage.migration.MigrationReport;
 import java.io.IOException;
 import java.util.Objects;
+import java.util.Optional;
 import net.minecraft.NBTBase;
 import net.minecraft.NBTTagCompound;
 import net.minecraft.NBTTagList;
@@ -25,7 +27,9 @@ public final class QuestDatabasePersistence {
     private final QuestDatabase quests;
     private final QuestLineDatabase questLines;
     private final JsonDocumentStore store;
+    private final MigrationReport migrationReport;
     private NBTBase preservedEmbeddedQuestSettings;
+    private Optional<MigrationReport.Update> lastMigrationReport = Optional.empty();
     private boolean writesDisabled;
 
     public QuestDatabasePersistence(
@@ -33,15 +37,26 @@ public final class QuestDatabasePersistence {
         QuestLineDatabase questLines,
         JsonDocumentStore store
     ) {
+        this(quests, questLines, store, null);
+    }
+
+    public QuestDatabasePersistence(
+        QuestDatabase quests,
+        QuestLineDatabase questLines,
+        JsonDocumentStore store,
+        MigrationReport migrationReport
+    ) {
         this.quests = Objects.requireNonNull(quests, "quests");
         this.questLines = Objects.requireNonNull(questLines, "questLines");
         this.store = Objects.requireNonNull(store, "store");
+        this.migrationReport = migrationReport;
     }
 
     /** Loads both databases as one unit, clearing both whenever the document cannot be applied. */
     public synchronized JsonDocumentStore.Outcome load() throws IOException {
         writesDisabled = true;
         preservedEmbeddedQuestSettings = null;
+        lastMigrationReport = Optional.empty();
         clearDatabases();
         JsonDocumentStore.LoadResult result;
         try {
@@ -54,6 +69,20 @@ public final class QuestDatabasePersistence {
         if (result.outcome() != JsonDocumentStore.Outcome.LOADED) {
             clearDatabases();
             writesDisabled = result.outcome() != JsonDocumentStore.Outcome.ABSENT;
+            if (result.outcome() == JsonDocumentStore.Outcome.ABSENT && migrationReport != null) {
+                try {
+                    lastMigrationReport = migrationReport.recordUnresolvedTaskFactories(quests);
+                    if (lastMigrationReport.isPresent()
+                        && lastMigrationReport.orElseThrow().status() == MigrationReport.Status.BLOCKED) {
+                        writesDisabled = true;
+                        return JsonDocumentStore.Outcome.QUARANTINED;
+                    }
+                } catch (IOException | RuntimeException failure) {
+                    clearDatabases();
+                    writesDisabled = true;
+                    throw failure;
+                }
+            }
             return result.outcome();
         }
         if (!JsonSchemaFields.isCompatibleMitePortFormat(result.root())) {
@@ -85,6 +114,21 @@ public final class QuestDatabasePersistence {
         }
         preservedEmbeddedQuestSettings = loadedEmbeddedQuestSettings;
         writesDisabled = false;
+        if (migrationReport != null) {
+            try {
+                lastMigrationReport = migrationReport.recordUnresolvedTaskFactories(quests);
+                if (lastMigrationReport.isPresent()
+                    && lastMigrationReport.orElseThrow().status() == MigrationReport.Status.BLOCKED) {
+                    clearDatabases();
+                    writesDisabled = true;
+                    return JsonDocumentStore.Outcome.QUARANTINED;
+                }
+            } catch (IOException | RuntimeException failure) {
+                clearDatabases();
+                writesDisabled = true;
+                throw failure;
+            }
+        }
         return result.outcome();
     }
 
@@ -109,6 +153,10 @@ public final class QuestDatabasePersistence {
 
     public synchronized boolean isWritesDisabled() {
         return writesDisabled;
+    }
+
+    public synchronized Optional<MigrationReport.Update> lastMigrationReport() {
+        return lastMigrationReport;
     }
 
     public void clearDatabases() {

@@ -5,8 +5,10 @@ import com.github.postyizhan.betterquesting.platform.api.WorldStorage;
 import com.github.postyizhan.betterquesting.questing.QuestDatabase;
 import com.github.postyizhan.betterquesting.questing.QuestLineDatabase;
 import com.github.postyizhan.betterquesting.storage.QuestDatabasePersistence;
+import com.github.postyizhan.betterquesting.storage.migration.MigrationReport;
 import java.io.IOException;
 import java.util.Objects;
+import java.util.Optional;
 
 /** Server lifecycle for the shared quest and quest-line document. */
 public final class QuestDatabaseLifecycle {
@@ -25,7 +27,8 @@ public final class QuestDatabaseLifecycle {
         this.persistence = new QuestDatabasePersistence(
             quests,
             questLines,
-            new JsonDocumentStore(storage));
+            new JsonDocumentStore(storage),
+            new MigrationReport(storage, build));
         this.build = build;
     }
 
@@ -84,5 +87,13 @@ public final class QuestDatabaseLifecycle {
 
     public boolean isRetryOnWorldSave() {
         return retryOnWorldSave;
+    }
+
+    public boolean isWritesDisabled() {
+        return persistence.isWritesDisabled();
+    }
+
+    public Optional<MigrationReport.Update> lastMigrationReport() {
+        return persistence.lastMigrationReport();
     }
 }
