@@ -132,7 +132,8 @@ MITE 的 `ChatAllowedCharacters.allowedCharacters` 是 `String`，内容来自�
 - mapped JAR 的 `NetServerHandler.handleCustomPayload(Packet250CustomPayload)V` 与 `NetClientHandler.handleCustomPayload(Packet250CustomPayload)V` 两个方向都存在；载荷类构造器为 `Packet250CustomPayload(String,[B)V`。
 - RIC `PacketReader.registerServerPacketReader(ResourceLocation, PacketSupplier)` 与 `registerClientPacketReader(...)` 分别登记 C2S/S2C reader。其两个 required mixin 在 vanilla handler RETURN 读取 `payload.channel`，构造 `PacketByteBuf` 后调用 `Packet.apply(EntityPlayer)`。
 - RIC `Network.sendToClient(ServerPlayer, Packet)` 和 `Network.sendToServer(Packet)` 提供对应发送路径。
-- `ProbePackets` 登记独立的 `betterquesting:probe_c2s` 与 `betterquesting:probe_s2c`；C2S 收到 nonce 后由服务端回送同 nonce，代码不会信任客户端玩家标识。
+- `Packet250CustomPayload.readPacketData` 通过 `Packet.readString(input, 20)` 读取 channel，故 channel 全名最多 20 字符。`ProbePackets` 使用 19 字符的 `betterquesting:pc2s` 与 `betterquesting:ps2c`；C2S 收到 nonce 后由服务端回送同 nonce，代码不会信任客户端玩家标识。
+- 探针载荷现使用有版本和严格上限的 `QuestingPacket` envelope；无效版本、ID、长度或非四字节 nonce 会在 RIC supplier 内变成 inert packet，只执行其 no-op `apply`，不能进入有效探针的 apply/echo 路径。
 
 **未完成与限制：** 当前没有生产行为触发探针包，也未完成真实连接回环。`ProbePackets` 只验证 transport 注册和双向发送形状，未演示或保证服务端主线程调度。RIC reader 未在分派前提供长度、线程切换或异常隔离；这些事实意味着它只是 transport seam，不是阶段 4 的安全业务协议。真实业务 handler 禁止照搬该探针：必须先建立主线程调度、载荷长度/字段校验、权限校验和异常隔离。
 
