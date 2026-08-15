@@ -75,4 +75,8 @@ public final class NameCacheLifecycle {
     public boolean isRetryOnWorldSave() {
         return retryOnWorldSave;
     }
+
+    boolean isWritable() {
+        return !retryOnWorldSave && !persistence.isWritesDisabled();
+    }
 }

@@ -17,8 +17,11 @@ import com.github.postyizhan.betterquesting.storage.migration.MigrationReport;
 import java.io.IOException;
 import java.util.Objects;
 import moddedmite.rustedironcore.api.event.Handlers;
+import moddedmite.rustedironcore.api.event.events.PlayerLoggedInEvent;
 import moddedmite.rustedironcore.api.event.listener.IInitializationListener;
+import moddedmite.rustedironcore.api.event.listener.IPlayerEventListener;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.ServerPlayer;
 import net.minecraft.server.MinecraftServer;
 
 public final class CommonBootstrap {
@@ -51,6 +54,12 @@ public final class CommonBootstrap {
         }
         initialized = true;
         ProbePackets.register();
+        Handlers.PlayerEvent.register(new IPlayerEventListener() {
+            @Override
+            public void onPlayerLoggedIn(PlayerLoggedInEvent event) {
+                updatePlayerNameCache(event.player());
+            }
+        });
         Handlers.Initialization.register(new IInitializationListener() {
             @Override
             public void onServerStarted(MinecraftServer server) {
@@ -65,6 +74,22 @@ public final class CommonBootstrap {
                 loadQuestLoot(server);
             }
         });
+    }
+
+    private static void updatePlayerNameCache(ServerPlayer player) {
+        if (player == null) return;
+        MinecraftServer server = player.mcServer;
+        var identities = ServerIdentityContext.current(server).orElse(null);
+        String reportedName = player.getEntityName();
+        PlayerNameCacheConsumer.Outcome outcome = PlayerNameCacheConsumer.consume(
+            server, reportedName, identities,
+            identities == null ? null : () -> new MitePlayerIdentityAdapter(identities).resolve(player),
+            ServerIdentityContext::current, nameCacheServer, nameCacheLifecycle, NameCache.INSTANCE);
+        if (outcome == PlayerNameCacheConsumer.Outcome.UNRESOLVED) {
+            BetterQuestingMod.LOGGER.warn(
+                "Skipped BetterQuesting NameCache update for unresolved player username '{}'",
+                reportedName);
+        }
     }
 
     private static void loadQuestLoot(MinecraftServer server) {

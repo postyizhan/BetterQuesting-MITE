@@ -7,9 +7,9 @@ import java.util.UUID;
 /**
  * Resolves platform player names and controls explicit legacy UUID mappings.
  *
- * <p>The current implementation keeps mappings only in process memory. Until WorldStorage and the migration
- * batch add durable mapping records and append-only audit, callers must not write identity-keyed progress files
- * from these results. Mapping removal and replacement decisions do not survive a restart.</p>
+ * <p>The production implementation stores explicit mapping decisions in world-bound durable storage with an
+ * append-only audit trail. Callers must still use only the service bound to their current server and must isolate
+ * unresolved identities rather than inventing fallback UUIDs.</p>
  */
 public interface PlayerIdentityService {
     PlayerIdentityResolution resolveUsername(String username);

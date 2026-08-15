@@ -160,7 +160,7 @@
 
 保留决定：继续使用 `Locale.ROOT` 折叠；用户名下界保持 1 字符，不猜测 3 字符；`PlayerIdentityService` 继续放在 `platform/api`。这些放置与边界均来自 plan.md §4.2 的平台能力接口设计。null adapter 仍以 `<null>` 隔离并报告。
 
-当前映射是**内存态**，重启不保留；WorldStorage 和迁移持久化完成前，禁止任何 identity-keyed progress 写入。`merge` 只能指向已有 legacy 映射，不能借此创建隐式目标。
+生产映射现由 world-bound `PersistentPlayerIdentityService` 持久化到 `identity/LegacyIdentityMappings.txt`，并把显式管理员决定追加到 `identity/IdentityAudit.log`；重启后会重新加载。只有当前 server owner 的 binding 可用于 identity-keyed 消费，unresolved 结果仍必须隔离。`merge` 只能指向已有 legacy 映射，不能借此创建隐式目标。
 
 #### 已实现的身份解析细节
 
@@ -286,6 +286,12 @@ reviewer 用 Claude 家族，两条都是 writer（GPT 家族）自查没发现�
 - 无并发测试。靠 `synchronized` 加 javadoc 声明主线程；`WorldStorage` 仍无按路径内部锁。
 - Linux 未测，异常映射可能与 Windows 不同。
 
+#### `NameCache` 登录消费（已完成）
+
+RIC `PlayerLoggedInEvent` 现会通过 `MitePlayerIdentityAdapter` 解析玩家，并只在 `ServerPlayer.mcServer` 同时匹配当前 identity binding 与可写的 `NameCacheLifecycle` binding 时更新 `NameCache`。key 是规范化用户名派生的 identity UUID，value 保留玩家本次报告的原始大小写；已有 `isOP` bit 原样保留，不从 MITE 权限 API 推断。规则外名称只记录 warning 并跳过，不生成 fallback UUID、不修改 identity mapping。更新不立即写盘，沿用既有 world save/server stop 路径持久化。
+
+纯 JVM 测试覆盖 UUID/key、大小写、幂等、OP 保留、规则外隔离、binding/写禁用 gating，以及 world save 后重启加载。剩余风险仅是 runtime smoke：RIC 登录事件是否在目标整合环境按预期触发、回调与 server/world 生命周期的实际时序，以及映射后的 `ServerPlayer.mcServer` 所有权检查尚未在游戏内验证。
+
 ### 4.2d JSON 序列化层（已完成）
 
 提交 `feat: 建立 NBT 与 JSON 互转层并接入替换前 readback 校验`。这是 §4.3 第 3 项的序列化部分。
@@ -373,7 +379,7 @@ streaming 路径也排序 key（上游 streaming 走 1.7.10 `HashMap` keySet 无
 6. ~~实现 `LegacyQuestImporter`；旧 `QuestProgress.json` 转换为逐玩家文件后必须保留原件。~~ 已完成；实现为 `LegacyQuestProgressImporter` 的 completion-only copy migration，原件永不删除，协议和限制见下文。
 7. 周期 autosave、world save、server stop 均触发 flush；server stop 必须等待待处理 I/O 完成。
 8. 目标平台缺失物品、实体、维度等内容时生成 placeholder 和迁移报告，不得静默替换成其他内容。
-9. 最后接回 `NameCache`/`QuestCache`；`IQuestSettings.canUserEdit` 随 `NameCache` 后续处理，不能遗漏或让网络/GUI 假设权限检查已存在。
+9. `NameCache` 的存储生命周期与登录自动更新已接回；仍需接回 `QuestCache`。`IQuestSettings.canUserEdit` 的 OP/编辑权限策略尚未处理，不能让网络/GUI 假设权限检查已存在。
 
 `QuestLoot.json` 在阶段 3 **只做识别、备份/损坏证据留存和不透明保留**；语义解析仍属于阶段 7 的 LootRegistry。B4.6 的存储威胁模型与本 mod 其余基于路径的 world persistence 一致：宿主进程和本地用户受信任。操作开始时已经存在的意外 symlink/reparse point、非常规 source、恶意文件 bytes、截断、超限、深度攻击、普通 I/O 失败、命名碰撞和部分写入属于范围内；恶意本地参与者在操作期间并发替换父目录、junction 或预留文件不属于范围内。实现不会也不得声称父路径遍历 race-free。
 
