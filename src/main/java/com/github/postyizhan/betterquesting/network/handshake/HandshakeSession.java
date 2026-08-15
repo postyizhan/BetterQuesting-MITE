@@ -2,6 +2,7 @@ package com.github.postyizhan.betterquesting.network.handshake;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 
 public final class HandshakeSession {
     public enum State {
@@ -38,6 +39,7 @@ public final class HandshakeSession {
     }
 
     private final Thread owner;
+    private final Object lifecycleLock = new Object();
     private final HandshakeCapabilities localCapabilities;
     private final HandshakeLimits limits;
 
@@ -61,77 +63,91 @@ public final class HandshakeSession {
         }
     }
 
-    public HandshakeHello start() {
+    /** Starts this side with a token established by the client connection. */
+    public HandshakeHello start(UUID connectionToken) {
         checkOwner();
-        if (state != State.NEW) {
-            throw new IllegalStateException("handshake cannot be started in state " + state);
-        }
+        synchronized (lifecycleLock) {
+            if (state != State.NEW) {
+                throw new IllegalStateException("handshake cannot be started in state " + state);
+            }
 
-        localHello = new HandshakeHello(localCapabilities);
-        state = State.HELLO_SENT;
-        return localHello;
+            localHello = new HandshakeHello(
+                Objects.requireNonNull(connectionToken, "connectionToken"), localCapabilities);
+            state = State.HELLO_SENT;
+            return localHello;
+        }
     }
 
     public ReceiveResult receive(HandshakeHello hello) {
         checkOwner();
-        if (state == State.CLOSED) {
-            throw new IllegalStateException("handshake session is closed");
-        }
-        Objects.requireNonNull(hello, "hello");
+        synchronized (lifecycleLock) {
+            if (state == State.CLOSED) {
+                throw new IllegalStateException("handshake session is closed");
+            }
+            Objects.requireNonNull(hello, "hello");
 
-        if (state == State.NEW) {
-            return result(ReceiveOutcome.OUT_OF_ORDER, null);
-        }
-        if (state == State.FAILED) {
-            return result(ReceiveOutcome.IGNORED, failureReason);
-        }
-        if (state == State.READY) {
-            ReceiveOutcome outcome = remoteHello.equals(hello)
-                ? ReceiveOutcome.DUPLICATE
-                : ReceiveOutcome.CONFLICT;
-            return result(outcome, null);
-        }
+            if (state == State.NEW) {
+                return result(ReceiveOutcome.OUT_OF_ORDER, null);
+            }
+            if (state == State.FAILED) {
+                return result(ReceiveOutcome.IGNORED, failureReason);
+            }
+            if (state == State.READY) {
+                ReceiveOutcome outcome = remoteHello.equals(hello)
+                    ? ReceiveOutcome.DUPLICATE
+                    : ReceiveOutcome.CONFLICT;
+                return result(outcome, null);
+            }
 
-        HandshakeCapabilities remote = hello.capabilities();
-        FailureReason rejection = validate(remote);
-        if (rejection != null) {
-            state = State.FAILED;
-            failureReason = rejection;
-            negotiation = null;
-            remoteHello = null;
-            return result(ReceiveOutcome.REJECTED, rejection);
-        }
+            HandshakeCapabilities remote = hello.capabilities();
+            FailureReason rejection = validate(remote);
+            if (rejection != null) {
+                state = State.FAILED;
+                failureReason = rejection;
+                negotiation = null;
+                remoteHello = null;
+                return result(ReceiveOutcome.REJECTED, rejection);
+            }
 
-        long negotiatedFeatures = localCapabilities.supportedFeatureBits()
-            & remote.supportedFeatureBits()
-            & limits.knownFeatureBits();
-        negotiation = new HandshakeNegotiation(
-            localCapabilities.protocolVersion(),
-            localCapabilities.dataFormatVersion(),
-            negotiatedFeatures);
-        remoteHello = hello;
-        state = State.READY;
-        return result(ReceiveOutcome.READY, null);
+            long negotiatedFeatures = localCapabilities.supportedFeatureBits()
+                & remote.supportedFeatureBits()
+                & limits.knownFeatureBits();
+            negotiation = new HandshakeNegotiation(
+                localCapabilities.protocolVersion(),
+                localCapabilities.dataFormatVersion(),
+                negotiatedFeatures);
+            remoteHello = hello;
+            state = State.READY;
+            return result(ReceiveOutcome.READY, null);
+        }
     }
 
     public State state() {
         checkOwner();
-        return state;
+        synchronized (lifecycleLock) {
+            return state;
+        }
     }
 
     public HandshakeHello localHello() {
         checkOwner();
-        return localHello;
+        synchronized (lifecycleLock) {
+            return localHello;
+        }
     }
 
     public Optional<HandshakeNegotiation> negotiation() {
         checkOwner();
-        return Optional.ofNullable(negotiation);
+        synchronized (lifecycleLock) {
+            return Optional.ofNullable(negotiation);
+        }
     }
 
     public Optional<FailureReason> failureReason() {
         checkOwner();
-        return Optional.ofNullable(failureReason);
+        synchronized (lifecycleLock) {
+            return Optional.ofNullable(failureReason);
+        }
     }
 
     public void close() {
@@ -170,12 +186,16 @@ public final class HandshakeSession {
     }
 
     private void invalidate() {
-        checkOwner();
-        state = State.CLOSED;
-        localHello = null;
-        remoteHello = null;
-        negotiation = null;
-        failureReason = null;
+        synchronized (lifecycleLock) {
+            if (state == State.CLOSED) {
+                return;
+            }
+            state = State.CLOSED;
+            localHello = null;
+            remoteHello = null;
+            negotiation = null;
+            failureReason = null;
+        }
     }
 
     private void checkOwner() {

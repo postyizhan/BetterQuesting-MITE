@@ -30,6 +30,7 @@ public final class LoginSettingsSyncState implements AutoCloseable {
     private State state = State.EMPTY;
     private LoginSettingsSnapshot snapshot;
     private SnapshotApplication application;
+    private boolean applying;
 
     public LoginSettingsSyncState() {
         this(ignored -> { });
@@ -87,15 +88,29 @@ public final class LoginSettingsSyncState implements AutoCloseable {
         synchronized (lifecycleLock) {
             snapshot = null;
             application = null;
+            applying = false;
             state = State.CLOSED;
         }
     }
 
     private ApplyOutcome applyValidated(LoginSettingsSnapshot candidate) {
         candidate.validateForWire();
+        if (applying) {
+            close();
+            throw new IllegalStateException("login settings application callback reentered");
+        }
         if (snapshot == null) {
-            application.apply(candidate);
+            applying = true;
+            try {
+                application.apply(candidate);
+            } finally {
+                applying = false;
+            }
             ensureOpen();
+            if (state != State.EMPTY || snapshot != null) {
+                close();
+                throw new IllegalStateException("login settings application changed state reentrantly");
+            }
             snapshot = candidate;
             state = State.PUBLISHED;
             return ApplyOutcome.APPLIED;

@@ -79,6 +79,25 @@ class LoginSettingsSyncStateTest {
     }
 
     @Test
+    void applicationCallbackReentryFailsClosedWithoutDoublePublish() {
+        AtomicReference<LoginSettingsSyncState> reference = new AtomicReference<>();
+        AtomicReference<Throwable> nestedFailure = new AtomicReference<>();
+        LoginSettingsSyncState state = new LoginSettingsSyncState(candidate -> {
+            try {
+                reference.get().apply(snapshot("nested", 2));
+            } catch (Throwable failure) {
+                nestedFailure.set(failure);
+            }
+        });
+        reference.set(state);
+
+        assertThrows(IllegalStateException.class, () -> state.apply(snapshot("outer", 1)));
+        assertTrue(nestedFailure.get() instanceof IllegalStateException);
+        assertEquals(LoginSettingsSyncState.State.CLOSED, state.state());
+        assertTrue(state.snapshot().isEmpty());
+    }
+
+    @Test
     void closeClearsPublishedStateAndPermanentlyInvalidatesThatSession() {
         LoginSettingsSyncState state = new LoginSettingsSyncState();
         LoginSettingsSnapshot snapshot = snapshot("Session", 1);
