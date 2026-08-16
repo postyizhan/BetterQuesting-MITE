@@ -80,7 +80,7 @@ class UnresolvedTaskMigrationReportTest {
     }
 
     @Test
-    void futureMigrationReportIsPreservedAndBlocksOnlyNewReportEntries() throws IOException {
+    void futureMigrationReportIsPreservedAndBlocksTheLifecycleForTheWholeSession() throws IOException {
         Files.writeString(dataDirectory.resolve(QuestDatabasePersistence.PATH), questDocument(),
             StandardCharsets.UTF_8);
         byte[] future = existingReport().replace("\"1\"", "\"2\"")
@@ -96,8 +96,18 @@ class UnresolvedTaskMigrationReportTest {
         assertArrayEquals(future, Files.readAllBytes(dataDirectory.resolve(MigrationReport.PATH)));
         MigrationReport.Update update = lifecycle.lastMigrationReport().orElseThrow();
         assertEquals(MigrationReport.Status.BLOCKED, update.status());
+        assertEquals(MigrationReport.BlockReason.UNSUPPORTED_PORT_FORMAT,
+            update.blockReason().orElseThrow());
         assertTrue(update.quarantinePath().isPresent());
         assertTrue(Files.exists(dataDirectory.resolve(update.quarantinePath().orElseThrow())));
+
+        byte[] repaired = existingReport().getBytes(StandardCharsets.UTF_8);
+        Files.write(dataDirectory.resolve(MigrationReport.PATH), repaired);
+        assertEquals(com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore.Outcome.QUARANTINED,
+            lifecycle.onServerStarted());
+        assertTrue(quests.isEmpty());
+        assertTrue(lifecycle.isWritesDisabled());
+        assertArrayEquals(repaired, Files.readAllBytes(dataDirectory.resolve(MigrationReport.PATH)));
     }
 
     @Test
@@ -157,21 +167,23 @@ class UnresolvedTaskMigrationReportTest {
             ("{\"format:8\":\"3.1.0\",\"build:8\":\"old-build\",\"mitePortFormat:8\":\"1\","
                 + "\"issues:9\":{\"0:10\":{\"kind:8\":\"unresolved_task_factory\",\"quest:8\":\""
                 + QUEST + "\",\"taskIndex:3\":-1,\"factory:8\":\"missing:task\"}}}")
-                .getBytes(StandardCharsets.UTF_8));
+                .getBytes(StandardCharsets.UTF_8), MigrationReport.BlockReason.MALFORMED);
     }
 
     @Test
     void deeplyNestedReportIsQuarantinedWithoutOverwritingSource() throws IOException {
-        assertReportIsQuarantinedWithoutOverwritingSource(deepReport(140).getBytes(StandardCharsets.UTF_8));
+        assertReportIsQuarantinedWithoutOverwritingSource(
+            deepReport(140).getBytes(StandardCharsets.UTF_8), MigrationReport.BlockReason.TOO_DEEP);
     }
 
     @Test
     void oversizedReportIsQuarantinedWithoutOverwritingSource() throws IOException {
-        assertReportIsQuarantinedWithoutOverwritingSource(oversizedReport());
+        assertReportIsQuarantinedWithoutOverwritingSource(
+            oversizedReport(), MigrationReport.BlockReason.OVERSIZED);
     }
 
     @Test
-    void registeredFactoryThatCannotConstructIsNotReported() throws IOException {
+    void registeredFactoryThatCannotConstructIsReportedSeparatelyFromAMissingFactory() throws IOException {
         ResourceKey id = ResourceKey.parse("test:construction-failure-report");
         if (TaskRegistry.INSTANCE.getFactory(id) == null) TaskRegistry.INSTANCE.register(new FailingTaskFactory(id));
         Files.writeString(dataDirectory.resolve(QuestDatabasePersistence.PATH), questDocument(id.toString()),
@@ -181,8 +193,80 @@ class UnresolvedTaskMigrationReportTest {
 
         lifecycle.onServerStarted();
 
-        assertTrue(lifecycle.lastMigrationReport().isEmpty());
-        assertTrue(Files.notExists(dataDirectory.resolve(MigrationReport.PATH)));
+        MigrationReport.Update update = lifecycle.lastMigrationReport().orElseThrow();
+        assertEquals(MigrationReport.Status.RECORDED, update.status());
+        JsonObject issue = JsonDocuments.parseObject(Files.readString(
+            dataDirectory.resolve(MigrationReport.PATH), StandardCharsets.UTF_8))
+            .getAsJsonObject("issues:9").getAsJsonObject("0:10");
+        assertEquals("task_factory_construction_failed", issue.get("kind:8").getAsString());
+        assertEquals(id.toString(), issue.get("factory:8").getAsString());
+    }
+
+    @Test
+    void reportValidationRejectsLossyOrImpossibleIssueEntries() throws IOException {
+        String issue = "{\"kind:8\":\"unresolved_task_factory\",\"quest:8\":\"" + QUEST
+            + "\",\"taskIndex:3\":1e0,\"factory:8\":\"missing:task\"}";
+        assertReportIsQuarantinedWithoutOverwritingSource(
+            reportWithIssues("\"0:10\":" + issue).getBytes(StandardCharsets.UTF_8),
+            MigrationReport.BlockReason.MALFORMED);
+
+        issue = "{\"kind:8\":\"unresolved_task_factory\",\"quest:8\":\"" + QUEST
+            + "\",\"taskIndex:3\":1,\"taskIndex:8\":\"1\",\"factory:8\":\"missing:task\"}";
+        assertReportIsQuarantinedWithoutOverwritingSource(
+            reportWithIssues("\"0:10\":" + issue).getBytes(StandardCharsets.UTF_8),
+            MigrationReport.BlockReason.MALFORMED);
+
+        issue = "{\"kind:8\":\"unresolved_task_factory\",\"quest:8\":\"" + QUEST
+            + "\",\"taskIndex:3\":1,\"factory:8\":\"missing:task\"}";
+        assertReportIsQuarantinedWithoutOverwritingSource(
+            reportWithIssues("\"0:10\":" + issue + ",\"1:10\":" + issue)
+                .getBytes(StandardCharsets.UTF_8), MigrationReport.BlockReason.MALFORMED);
+    }
+
+    @Test
+    void reportRejectionIsAtomicBeforeTheLiveDatabaseIsActivated() throws IOException {
+        Files.writeString(dataDirectory.resolve(QuestDatabasePersistence.PATH), questDocument(),
+            StandardCharsets.UTF_8);
+        Files.writeString(dataDirectory.resolve(MigrationReport.PATH), "{\"broken\":true}",
+            StandardCharsets.UTF_8);
+        QuestDatabase quests = new QuestDatabase();
+        ObservingQuarantineStorage storage = new ObservingQuarantineStorage(dataDirectory, quests);
+        QuestDatabaseLifecycle lifecycle = new QuestDatabaseLifecycle(
+            storage, quests, new QuestLineDatabase(), "test-build");
+
+        assertEquals(com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore.Outcome.QUARANTINED,
+            lifecycle.onServerStarted());
+        assertTrue(storage.databaseWasEmptyAtQuarantine);
+        assertTrue(quests.isEmpty());
+    }
+
+    @Test
+    void transientQuarantineFailureRetriesThenContentRejectionLatches() throws IOException {
+        Files.writeString(dataDirectory.resolve(QuestDatabasePersistence.PATH), questDocument(),
+            StandardCharsets.UTF_8);
+        byte[] malformed = "{\"broken\":true}".getBytes(StandardCharsets.UTF_8);
+        Files.write(dataDirectory.resolve(MigrationReport.PATH), malformed);
+        FailingQuarantineStorage storage = new FailingQuarantineStorage(dataDirectory, 1);
+        QuestDatabase quests = new QuestDatabase();
+        QuestDatabaseLifecycle lifecycle = new QuestDatabaseLifecycle(
+            storage, quests, new QuestLineDatabase(), "test-build");
+
+        assertThrows(IOException.class, lifecycle::onServerStarted);
+        assertTrue(quests.isEmpty());
+        assertEquals(com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore.Outcome.QUARANTINED,
+            lifecycle.onServerStarted());
+        MigrationReport.Update update = lifecycle.lastMigrationReport().orElseThrow();
+        assertEquals(MigrationReport.BlockReason.UNSUPPORTED_SCHEMA,
+            update.blockReason().orElseThrow());
+        assertArrayEquals(malformed, Files.readAllBytes(
+            dataDirectory.resolve(update.quarantinePath().orElseThrow())));
+
+        Files.writeString(dataDirectory.resolve(MigrationReport.PATH), existingReport(),
+            StandardCharsets.UTF_8);
+        assertEquals(com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore.Outcome.QUARANTINED,
+            lifecycle.onServerStarted());
+        assertTrue(quests.isEmpty());
+        assertTrue(lifecycle.isWritesDisabled());
     }
 
     @Test
@@ -225,6 +309,11 @@ class UnresolvedTaskMigrationReportTest {
             + "\"kind:3\":12,\"extension:8\":\"future-data\"}}}";
     }
 
+    private static String reportWithIssues(String issues) {
+        return "{\"format:8\":\"3.1.0\",\"build:8\":\"old-build\",\"mitePortFormat:8\":\"1\","
+            + "\"issues:9\":{" + issues + "}}";
+    }
+
     private static String deepReport(int depth) {
         StringBuilder report = new StringBuilder("{\"mitePortFormat:8\":\"1\",\"issues:9\":{");
         for (int index = 0; index < depth; index++) report.append("\"x:10\":{");
@@ -239,7 +328,8 @@ class UnresolvedTaskMigrationReportTest {
         return oversized;
     }
 
-    private void assertReportIsQuarantinedWithoutOverwritingSource(byte[] original) throws IOException {
+    private void assertReportIsQuarantinedWithoutOverwritingSource(byte[] original,
+        MigrationReport.BlockReason reason) throws IOException {
         Files.writeString(dataDirectory.resolve(QuestDatabasePersistence.PATH), emptyQuestDocument(),
             StandardCharsets.UTF_8);
         Files.write(dataDirectory.resolve(MigrationReport.PATH), original);
@@ -250,7 +340,12 @@ class UnresolvedTaskMigrationReportTest {
             lifecycle.onServerStarted());
         assertEquals(MigrationReport.Status.BLOCKED,
             lifecycle.lastMigrationReport().orElseThrow().status());
+        assertEquals(reason, lifecycle.lastMigrationReport().orElseThrow().blockReason().orElseThrow());
         assertArrayEquals(original, Files.readAllBytes(dataDirectory.resolve(MigrationReport.PATH)));
+        assertArrayEquals(Arrays.copyOf(original,
+                Math.min(original.length, MigrationReport.MAX_DOCUMENT_BYTES + 1)),
+            Files.readAllBytes(dataDirectory.resolve(
+                lifecycle.lastMigrationReport().orElseThrow().quarantinePath().orElseThrow())));
     }
 
     private static final class FailingTaskFactory implements IFactoryData<ITask, NBTTagCompound> {
@@ -284,5 +379,50 @@ class UnresolvedTaskMigrationReportTest {
         }
         @Override public Optional<Path> backup(String path) throws IOException { return delegate.backup(path); }
         @Override public void flush() throws IOException { delegate.flush(); }
+    }
+
+    private static class ObservingQuarantineStorage implements WorldStorage {
+        private final DirectoryWorldStorage delegate;
+        private final QuestDatabase quests;
+        private boolean databaseWasEmptyAtQuarantine;
+        protected ObservingQuarantineStorage(Path path, QuestDatabase quests) {
+            delegate = new DirectoryWorldStorage(path);
+            this.quests = quests;
+        }
+        @Override public boolean isAvailable() { return delegate.isAvailable(); }
+        @Override public Optional<Path> getDataDirectory() { return delegate.getDataDirectory(); }
+        @Override public Optional<String> getDisabledReason() { return delegate.getDisabledReason(); }
+        @Override public boolean exists(String path) throws IOException { return delegate.exists(path); }
+        @Override public <T> Optional<T> read(String path, InputReader<T> reader) throws IOException { return delegate.read(path, reader); }
+        @Override public List<String> readLines(String path) throws IOException { return delegate.readLines(path); }
+        @Override public List<String> list(String path, String suffix) throws IOException { return delegate.list(path, suffix); }
+        @Override public boolean delete(String path) throws IOException { return delegate.delete(path); }
+        @Override public void appendLine(String path, String line) throws IOException { delegate.appendLine(path, line); }
+        @Override public void writeAtomically(String path, OutputWriter writer) throws IOException {
+            if (path.startsWith("malformed_" + MigrationReport.PATH)) {
+                databaseWasEmptyAtQuarantine = quests.isEmpty();
+            }
+            delegate.writeAtomically(path, writer);
+        }
+        @Override public void writeAtomically(String path, OutputWriter writer, ReadbackValidator validator)
+            throws IOException {
+            delegate.writeAtomically(path, writer, validator);
+        }
+        @Override public Optional<Path> backup(String path) throws IOException { return delegate.backup(path); }
+        @Override public void flush() throws IOException { delegate.flush(); }
+    }
+
+    private static final class FailingQuarantineStorage extends ObservingQuarantineStorage {
+        private int failures;
+        private FailingQuarantineStorage(Path path, int failures) {
+            super(path, new QuestDatabase());
+            this.failures = failures;
+        }
+        @Override public void writeAtomically(String path, OutputWriter writer) throws IOException {
+            if (path.startsWith("malformed_" + MigrationReport.PATH) && failures-- > 0) {
+                throw new IOException("injected report quarantine failure");
+            }
+            super.writeAtomically(path, writer);
+        }
     }
 }

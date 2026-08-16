@@ -230,6 +230,39 @@ class CommonBootstrapQuestPersistenceTest {
         assertTrue(secondQuests.isEmpty());
     }
 
+    @Test
+    void blockedMigrationReportDoesNotPoisonAnotherWorldBinding() throws IOException {
+        Path firstWorld = dataDirectory.resolve("first");
+        Files.createDirectories(firstWorld);
+        Files.writeString(firstWorld.resolve("QuestDatabase.json"),
+            "{\"questDatabase:9\":{},\"questLines:9\":{}}");
+        Files.writeString(firstWorld.resolve("MigrationReport.json"), "{\"broken\":true}");
+        QuestDatabaseLifecycle blocked = new QuestDatabaseLifecycle(
+            new DirectoryWorldStorage(firstWorld), new QuestDatabase(), new QuestLineDatabase(), "test");
+        assertEquals(com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore.Outcome.QUARANTINED,
+            blocked.onServerStarted());
+        CommonBootstrap.bindQuestLifecycles(owner, blocked, null);
+
+        Object otherOwner = new Object();
+        Path secondWorld = dataDirectory.resolve("second");
+        DirectoryWorldStorage secondStorage = new DirectoryWorldStorage(secondWorld);
+        QuestDatabase secondQuests = new QuestDatabase();
+        QuestDatabaseLifecycle second = new QuestDatabaseLifecycle(
+            secondStorage, secondQuests, new QuestLineDatabase(), "test");
+        assertEquals(com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore.Outcome.ABSENT,
+            second.onServerStarted());
+        QuestProgressLifecycle progress = new QuestProgressLifecycle(secondStorage, secondQuests);
+        progress.onServerStarted();
+        CommonBootstrap.bindQuestLifecycles(otherOwner, second, progress);
+        secondQuests.createNew(RETAINED_QUEST);
+
+        CommonBootstrap.onQuestWorldSave(owner, true);
+        assertTrue(secondQuests.containsKey(RETAINED_QUEST));
+        CommonBootstrap.onQuestWorldSave(otherOwner, false);
+        assertTrue(Files.exists(secondWorld.resolve("QuestDatabase.json")));
+        CommonBootstrap.onQuestWorldSave(otherOwner, true);
+    }
+
     private Fixture start(TrackingStorage storage) throws IOException {
         Fixture fixture = loadUnbound(storage);
         CommonBootstrap.bindQuestLifecycles(owner, fixture.database(), fixture.progress());

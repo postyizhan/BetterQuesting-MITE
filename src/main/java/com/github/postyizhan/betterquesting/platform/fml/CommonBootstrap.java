@@ -156,7 +156,8 @@ public final class CommonBootstrap {
     }
 
     private static void loadQuestDatabases(MinecraftServer server) {
-        if (server == questDatabaseFailedServer) {
+        if (server == questDatabaseFailedServer && questDatabaseFailedLifecycle != null
+            && questDatabaseFailedLifecycle.isSessionBlocked()) {
             QuestDatabase.INSTANCE.clear();
             QuestLineDatabase.INSTANCE.clear();
             questProgressWritesBlocked = true;
@@ -164,14 +165,18 @@ public final class CommonBootstrap {
                 "BetterQuesting QuestDatabase.json remains blocked for this server session");
             return;
         }
+        QuestDatabaseLifecycle lifecycle = server == questDatabaseFailedServer
+            ? questDatabaseFailedLifecycle : null;
         try {
             MiteWorldStorage storage = MiteWorldStorage.resolve(server);
             if (!storage.isAvailable()) {
                 throw new IOException("BetterQuesting quest database storage is unavailable: "
                     + storage.getDisabledReason().orElse("unknown reason"));
             }
-            QuestDatabaseLifecycle lifecycle = new QuestDatabaseLifecycle(
-                storage, QuestDatabase.INSTANCE, QuestLineDatabase.INSTANCE, currentBuild());
+            if (lifecycle == null) {
+                lifecycle = new QuestDatabaseLifecycle(
+                    storage, QuestDatabase.INSTANCE, QuestLineDatabase.INSTANCE, currentBuild());
+            }
             questDatabaseFailedLifecycle = lifecycle;
             JsonDocumentStore.Outcome outcome = lifecycle.onServerStarted();
             logMigrationReport(lifecycle.lastMigrationReport());
@@ -196,6 +201,7 @@ public final class CommonBootstrap {
             questDatabaseServer = null;
             questDatabaseLifecycle = null;
             questDatabaseFailedServer = server;
+            questDatabaseFailedLifecycle = lifecycle;
             questDatabaseStopPending = false;
             questProgressWritesBlocked = true;
             QuestDatabase.INSTANCE.clear();
@@ -210,17 +216,18 @@ public final class CommonBootstrap {
         report.ifPresent(update -> {
             switch (update.status()) {
                 case RECORDED -> BetterQuestingMod.LOGGER.warn(
-                    "Preserved {} unresolved task factories as opaque task placeholders; recorded {} new "
+                    "Preserved {} task placeholders requiring migration review; recorded {} new "
                         + "occurrences in {}",
                     update.observed(), update.added(), MigrationReport.PATH);
                 case UNCHANGED -> BetterQuestingMod.LOGGER.warn(
-                    "Preserved {} unresolved task factories as opaque task placeholders; all occurrences "
+                    "Preserved {} task placeholders requiring migration review; all occurrences "
                         + "are already recorded in {}",
                     update.observed(), MigrationReport.PATH);
                 case BLOCKED -> BetterQuestingMod.LOGGER.error(
-                    "Preserved {} unresolved task factories as opaque task placeholders, but {} could not "
-                        + "be updated because its existing contents are unsupported; quarantine copy: {}",
+                    "Preserved {} task placeholders requiring migration review, but {} was rejected as {}; "
+                        + "quarantine copy: {}",
                     update.observed(), MigrationReport.PATH,
+                    update.blockReason().orElse(MigrationReport.BlockReason.MALFORMED),
                     update.quarantinePath().orElse("unavailable"));
             }
         });

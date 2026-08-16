@@ -96,4 +96,8 @@ public final class QuestDatabaseLifecycle {
     public Optional<MigrationReport.Update> lastMigrationReport() {
         return persistence.lastMigrationReport();
     }
+
+    public boolean isSessionBlocked() {
+        return persistence.isSessionBlocked();
+    }
 }

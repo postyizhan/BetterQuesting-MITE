@@ -31,6 +31,7 @@ public final class QuestDatabasePersistence {
     private NBTBase preservedEmbeddedQuestSettings;
     private Optional<MigrationReport.Update> lastMigrationReport = Optional.empty();
     private boolean writesDisabled;
+    private boolean sessionBlocked;
 
     public QuestDatabasePersistence(
         QuestDatabase quests,
@@ -55,6 +56,10 @@ public final class QuestDatabasePersistence {
     /** Loads both databases as one unit, clearing both whenever the document cannot be applied. */
     public synchronized JsonDocumentStore.Outcome load() throws IOException {
         writesDisabled = true;
+        if (sessionBlocked) {
+            clearDatabases();
+            return JsonDocumentStore.Outcome.QUARANTINED;
+        }
         preservedEmbeddedQuestSettings = null;
         lastMigrationReport = Optional.empty();
         clearDatabases();
@@ -74,6 +79,7 @@ public final class QuestDatabasePersistence {
                     lastMigrationReport = migrationReport.recordUnresolvedTaskFactories(quests);
                     if (lastMigrationReport.isPresent()
                         && lastMigrationReport.orElseThrow().status() == MigrationReport.Status.BLOCKED) {
+                        sessionBlocked = true;
                         writesDisabled = true;
                         return JsonDocumentStore.Outcome.QUARANTINED;
                     }
@@ -107,18 +113,16 @@ public final class QuestDatabasePersistence {
         try {
             loadedQuests.readFromNBT(NbtCompat.getListOrEmpty(result.root(), "questDatabase"), false);
             loadedQuestLines.readFromNBT(NbtCompat.getListOrEmpty(result.root(), "questLines"), false);
-            replaceDatabases(loadedQuests, loadedQuestLines);
         } catch (RuntimeException failure) {
             clearDatabases();
             throw failure;
         }
-        preservedEmbeddedQuestSettings = loadedEmbeddedQuestSettings;
-        writesDisabled = false;
         if (migrationReport != null) {
             try {
-                lastMigrationReport = migrationReport.recordUnresolvedTaskFactories(quests);
+                lastMigrationReport = migrationReport.recordUnresolvedTaskFactories(loadedQuests);
                 if (lastMigrationReport.isPresent()
                     && lastMigrationReport.orElseThrow().status() == MigrationReport.Status.BLOCKED) {
+                    sessionBlocked = true;
                     clearDatabases();
                     writesDisabled = true;
                     return JsonDocumentStore.Outcome.QUARANTINED;
@@ -129,6 +133,9 @@ public final class QuestDatabasePersistence {
                 throw failure;
             }
         }
+        replaceDatabases(loadedQuests, loadedQuestLines);
+        preservedEmbeddedQuestSettings = loadedEmbeddedQuestSettings;
+        writesDisabled = false;
         return result.outcome();
     }
 
@@ -157,6 +164,10 @@ public final class QuestDatabasePersistence {
 
     public synchronized Optional<MigrationReport.Update> lastMigrationReport() {
         return lastMigrationReport;
+    }
+
+    public synchronized boolean isSessionBlocked() {
+        return sessionBlocked;
     }
 
     public void clearDatabases() {
