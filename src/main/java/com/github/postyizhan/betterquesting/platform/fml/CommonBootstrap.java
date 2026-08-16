@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.util.Objects;
 import moddedmite.rustedironcore.api.event.Handlers;
 import moddedmite.rustedironcore.api.event.events.PlayerLoggedInEvent;
+import moddedmite.rustedironcore.api.event.events.PlayerLoggedOutEvent;
 import moddedmite.rustedironcore.api.event.listener.IInitializationListener;
 import moddedmite.rustedironcore.api.event.listener.IPlayerEventListener;
 import net.fabricmc.loader.api.FabricLoader;
@@ -54,10 +55,16 @@ public final class CommonBootstrap {
         }
         initialized = true;
         ProbePackets.register();
+        LoginSyncServerWiring.registerReader();
         Handlers.PlayerEvent.register(new IPlayerEventListener() {
             @Override
             public void onPlayerLoggedIn(PlayerLoggedInEvent event) {
                 updatePlayerNameCache(event.player());
+            }
+
+            @Override
+            public void onPlayerLoggedOut(PlayerLoggedOutEvent event) {
+                LoginSyncServerWiring.onPlayerLoggedOut(event.player());
             }
         });
         Handlers.Initialization.register(new IInitializationListener() {
@@ -721,6 +728,7 @@ public final class CommonBootstrap {
 
     public static void onServerStopping(MinecraftServer server, boolean worldBeingDeleted) {
         BetterQuestingMod.LOGGER.info("Server stop probe observed");
+        LoginSyncServerWiring.onServerStopping(server);
         onQuestServerStopping(server, worldBeingDeleted);
         if (server == questSettingsServer && questSettingsLifecycle != null) {
             try {

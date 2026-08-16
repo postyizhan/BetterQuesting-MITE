@@ -4,6 +4,7 @@ import com.github.postyizhan.betterquesting.core.BetterQuestingConstants;
 import com.github.postyizhan.betterquesting.network.PacketLimits;
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.util.Objects;
 import java.util.Optional;
 import moddedmite.rustedironcore.network.Packet;
 import moddedmite.rustedironcore.network.PacketByteBuf;
@@ -11,7 +12,7 @@ import moddedmite.rustedironcore.network.PacketReader;
 import net.minecraft.EntityPlayer;
 import net.minecraft.ResourceLocation;
 
-/** Disabled, direction-bound RIC transport shape for login sync frames. */
+/** Direction-bound RIC transport for login sync frames. */
 public final class LoginSyncTransportPackets {
     public static final ResourceLocation C2S_CHANNEL = new ResourceLocation(
         BetterQuestingConstants.MOD_ID, "lc2s", false);
@@ -21,11 +22,26 @@ public final class LoginSyncTransportPackets {
     private LoginSyncTransportPackets() {
     }
 
+    @FunctionalInterface
+    public interface FrameReceiver {
+        void receive(EntityPlayer player, LoginSyncFrame frame);
+    }
+
     public static void register() {
+        registerServer((player, frame) -> { });
+        registerClient((player, frame) -> { });
+    }
+
+    public static void registerServer(FrameReceiver receiver) {
+        Objects.requireNonNull(receiver, "receiver");
         PacketReader.registerServerPacketReader(C2S_CHANNEL,
-            buffer -> read(buffer, true));
+            buffer -> read(buffer, true, receiver));
+    }
+
+    public static void registerClient(FrameReceiver receiver) {
+        Objects.requireNonNull(receiver, "receiver");
         PacketReader.registerClientPacketReader(S2C_CHANNEL,
-            buffer -> read(buffer, false));
+            buffer -> read(buffer, false, receiver));
     }
 
     public static Packet c2s(LoginSyncFrame frame) {
@@ -64,13 +80,17 @@ public final class LoginSyncTransportPackets {
             if (encoded.length > PacketLimits.MAX_ENVELOPE_BYTES) {
                 return new RejectedPacket(channel);
             }
-            return new FramePacket(channel, encoded);
+            return new FramePacket(channel, encoded, null, null);
         } catch (RuntimeException invalidFrame) {
             return new RejectedPacket(channel);
         }
     }
 
-    private static Packet read(PacketByteBuf buffer, boolean serverbound) {
+    private static Packet read(
+        PacketByteBuf buffer,
+        boolean serverbound,
+        FrameReceiver receiver
+    ) {
         ResourceLocation channel = channel(serverbound);
         try {
             DataInputStream input = buffer == null ? null : buffer.getInputStream();
@@ -82,7 +102,7 @@ public final class LoginSyncTransportPackets {
             if (decoded.isEmpty() || decoded.orElseThrow().direction() != direction(serverbound)) {
                 return new RejectedPacket(channel);
             }
-            return new FramePacket(channel, encoded);
+            return new FramePacket(channel, encoded, decoded.orElseThrow(), receiver);
         } catch (IOException | RuntimeException malformedInput) {
             return new RejectedPacket(channel);
         }
@@ -101,10 +121,19 @@ public final class LoginSyncTransportPackets {
     private static final class FramePacket implements Packet {
         private final ResourceLocation channel;
         private final byte[] encoded;
+        private final LoginSyncFrame inboundFrame;
+        private final FrameReceiver receiver;
 
-        private FramePacket(ResourceLocation channel, byte[] encoded) {
+        private FramePacket(
+            ResourceLocation channel,
+            byte[] encoded,
+            LoginSyncFrame inboundFrame,
+            FrameReceiver receiver
+        ) {
             this.channel = channel;
             this.encoded = encoded.clone();
+            this.inboundFrame = inboundFrame;
+            this.receiver = receiver;
         }
 
         @Override
@@ -116,6 +145,14 @@ public final class LoginSyncTransportPackets {
 
         @Override
         public void apply(EntityPlayer player) {
+            if (receiver == null || inboundFrame == null) {
+                return;
+            }
+            try {
+                receiver.receive(player, inboundFrame);
+            } catch (RuntimeException | Error ignored) {
+                // RIC does not isolate Packet.apply failures from the vanilla packet lifecycle.
+            }
         }
 
         @Override

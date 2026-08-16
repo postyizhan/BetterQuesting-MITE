@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -21,6 +22,8 @@ import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import moddedmite.rustedironcore.network.Packet;
 import moddedmite.rustedironcore.network.PacketByteBuf;
 import moddedmite.rustedironcore.network.PacketReader;
@@ -36,7 +39,8 @@ class LoginSyncTransportPacketsTest {
 
     @BeforeEach
     void registerReaders() {
-        LoginSyncTransportPackets.register();
+        LoginSyncTransportPackets.registerServer((player, frame) -> { });
+        LoginSyncTransportPackets.registerClient((player, frame) -> { });
     }
 
     @Test
@@ -52,6 +56,28 @@ class LoginSyncTransportPacketsTest {
         assertNotNull(PacketReader.clientReaders.get(s2c));
         assertNull(PacketReader.clientReaders.get(c2s));
         assertNull(PacketReader.serverReaders.get(s2c));
+    }
+
+    @Test
+    void ricClientRegistrationReplacesTheExistingChannelReader() {
+        AtomicInteger firstCalls = new AtomicInteger();
+        AtomicInteger replacementCalls = new AtomicInteger();
+        LoginSyncTransportPackets.registerClient(
+            (player, frame) -> firstCalls.incrementAndGet());
+        PacketSupplier first = PacketReader.clientReaders.get(
+            LoginSyncTransportPackets.S2C_CHANNEL.toString());
+
+        LoginSyncTransportPackets.registerClient(
+            (player, frame) -> replacementCalls.incrementAndGet());
+        PacketSupplier replacement = PacketReader.clientReaders.get(
+            LoginSyncTransportPackets.S2C_CHANNEL.toString());
+
+        assertNotSame(first, replacement);
+        Packet packet = readClient(LoginSyncFrameCodec.encode(
+            LoginSyncFrame.serverHello(hello())));
+        assertDoesNotThrow(() -> packet.apply(null));
+        assertEquals(0, firstCalls.get());
+        assertEquals(1, replacementCalls.get());
     }
 
     @Test
@@ -179,7 +205,66 @@ class LoginSyncTransportPacketsTest {
     }
 
     @Test
-    void everyPacketApplyIsInertAndGeneratedPayloadsFitTheEnvelope() {
+    void onlyReaderCreatedPacketsDispatchToTheirDirectionOwnedReceiver() {
+        AtomicInteger serverCalls = new AtomicInteger();
+        AtomicInteger clientCalls = new AtomicInteger();
+        AtomicReference<LoginSyncFrame> serverFrame = new AtomicReference<>();
+        AtomicReference<LoginSyncFrame> clientFrame = new AtomicReference<>();
+        LoginSyncTransportPackets.registerServer((player, frame) -> {
+            serverCalls.incrementAndGet();
+            serverFrame.set(frame);
+        });
+        LoginSyncTransportPackets.registerClient((player, frame) -> {
+            clientCalls.incrementAndGet();
+            clientFrame.set(frame);
+        });
+        LoginSyncFrame clientHello = LoginSyncFrame.clientHello(hello());
+        LoginSyncFrame serverHello = LoginSyncFrame.serverHello(hello());
+
+        Packet outboundClient = LoginSyncTransportPackets.c2s(clientHello);
+        Packet outboundServer = LoginSyncTransportPackets.s2c(serverHello);
+        assertDoesNotThrow(() -> outboundClient.apply(null));
+        assertDoesNotThrow(() -> outboundServer.apply(null));
+        assertEquals(0, serverCalls.get());
+        assertEquals(0, clientCalls.get());
+
+        Packet inboundClient = readServer(LoginSyncFrameCodec.encode(clientHello));
+        Packet inboundServer = readClient(LoginSyncFrameCodec.encode(serverHello));
+        assertDoesNotThrow(() -> inboundClient.apply(null));
+        assertEquals(1, serverCalls.get());
+        assertEquals(clientHello, serverFrame.get());
+        assertEquals(0, clientCalls.get());
+        assertDoesNotThrow(() -> inboundServer.apply(null));
+        assertEquals(1, serverCalls.get());
+        assertEquals(1, clientCalls.get());
+        assertEquals(serverHello, clientFrame.get());
+
+        assertDoesNotThrow(() -> readServer(new byte[0]).apply(null));
+        assertDoesNotThrow(() -> readClient(new byte[0]).apply(null));
+        assertEquals(1, serverCalls.get());
+        assertEquals(1, clientCalls.get());
+    }
+
+    @Test
+    void receiverFailuresCannotEscapeRicApply() {
+        LoginSyncTransportPackets.registerServer((player, frame) -> {
+            throw new AssertionError("server receiver failed");
+        });
+        LoginSyncTransportPackets.registerClient((player, frame) -> {
+            throw new IllegalStateException("client receiver failed");
+        });
+
+        Packet serverbound = readServer(LoginSyncFrameCodec.encode(
+            LoginSyncFrame.clientHello(hello())));
+        Packet clientbound = readClient(LoginSyncFrameCodec.encode(
+            LoginSyncFrame.serverHello(hello())));
+
+        assertDoesNotThrow(() -> serverbound.apply(null));
+        assertDoesNotThrow(() -> clientbound.apply(null));
+    }
+
+    @Test
+    void outboundAndRejectedPacketsRemainInertAndFitTheEnvelope() {
         Packet c2s = LoginSyncTransportPackets.c2s(LoginSyncFrame.clientHello(hello()));
         Packet s2cHello = LoginSyncTransportPackets.s2c(LoginSyncFrame.serverHello(hello()));
         Packet s2cSettings = LoginSyncTransportPackets.s2c(LoginSyncFrame.settings(
