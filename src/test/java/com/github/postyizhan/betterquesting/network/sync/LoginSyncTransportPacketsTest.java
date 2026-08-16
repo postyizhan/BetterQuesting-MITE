@@ -25,7 +25,9 @@ import moddedmite.rustedironcore.network.Packet;
 import moddedmite.rustedironcore.network.PacketByteBuf;
 import moddedmite.rustedironcore.network.PacketReader;
 import moddedmite.rustedironcore.network.PacketSupplier;
+import net.minecraft.EntityPlayer;
 import net.minecraft.Packet250CustomPayload;
+import net.minecraft.ResourceLocation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -58,9 +60,49 @@ class LoginSyncTransportPacketsTest {
         LoginSyncFrame serverHello = LoginSyncFrame.serverHello(hello());
         LoginSyncFrame settings = LoginSyncFrame.settings(TOKEN, snapshot());
 
-        assertRoundTrip(LoginSyncTransportPackets.c2s(clientHello), PacketReader.serverReaders);
-        assertRoundTrip(LoginSyncTransportPackets.s2c(serverHello), PacketReader.clientReaders);
-        assertRoundTrip(LoginSyncTransportPackets.s2c(settings), PacketReader.clientReaders);
+        assertRoundTrip(
+            clientHello,
+            LoginSyncTransportPackets.c2s(clientHello),
+            PacketReader.serverReaders);
+        assertRoundTrip(
+            serverHello,
+            LoginSyncTransportPackets.s2c(serverHello),
+            PacketReader.clientReaders);
+        assertRoundTrip(
+            settings,
+            LoginSyncTransportPackets.s2c(settings),
+            PacketReader.clientReaders);
+    }
+
+    @Test
+    void extractedFramePayloadsRemainDefensivelyCopied() {
+        LoginSyncFrame expected = LoginSyncFrame.settings(TOKEN, snapshot());
+        Packet packet = LoginSyncTransportPackets.s2c(expected);
+
+        LoginSyncFrame extracted = LoginSyncTransportPackets.extract(packet).orElseThrow();
+        byte[] changedPayload = extracted.payload();
+        changedPayload[0] ^= 1;
+
+        assertArrayEquals(expected.payload(), extracted.payload());
+        assertEquals(expected, LoginSyncTransportPackets.extract(packet).orElseThrow());
+    }
+
+    @Test
+    void nullAndForeignPacketsCannotProduceFramesOrInvokePacketMethods() {
+        assertTrue(assertDoesNotThrow(() -> LoginSyncTransportPackets.extract(null)).isEmpty());
+
+        byte[] encoded = LoginSyncFrameCodec.encode(LoginSyncFrame.clientHello(hello()));
+        ForeignPacket sameChannel = new ForeignPacket(
+            LoginSyncTransportPackets.C2S_CHANNEL, encoded);
+        ForeignPacket wrongChannel = new ForeignPacket(
+            new ResourceLocation("betterquesting", "other", false), encoded);
+
+        assertTrue(assertDoesNotThrow(
+            () -> LoginSyncTransportPackets.extract(sameChannel)).isEmpty());
+        assertTrue(assertDoesNotThrow(
+            () -> LoginSyncTransportPackets.extract(wrongChannel)).isEmpty());
+        assertEquals(0, sameChannel.invocations);
+        assertEquals(0, wrongChannel.invocations);
     }
 
     @Test
@@ -171,13 +213,16 @@ class LoginSyncTransportPacketsTest {
     }
 
     private static void assertRoundTrip(
+        LoginSyncFrame expected,
         Packet original,
         Map<String, PacketSupplier> readers
     ) throws IOException {
+        assertEquals(expected, LoginSyncTransportPackets.extract(original).orElseThrow());
         Packet decoded = wireRoundTrip(original, readers);
         assertFalse(LoginSyncTransportPackets.isRejected(decoded));
         assertEquals(original.getChannel(), decoded.getChannel());
         assertArrayEquals(original.toVanilla().data, decoded.toVanilla().data);
+        assertEquals(expected, LoginSyncTransportPackets.extract(decoded).orElseThrow());
         assertDoesNotThrow(() -> decoded.apply(null));
     }
 
@@ -276,8 +321,39 @@ class LoginSyncTransportPacketsTest {
 
     private static void assertRejected(Packet packet) {
         assertTrue(LoginSyncTransportPackets.isRejected(packet));
+        assertTrue(assertDoesNotThrow(
+            () -> LoginSyncTransportPackets.extract(packet)).isEmpty());
         assertDoesNotThrow(() -> packet.apply(null));
         assertEquals(0, packet.toVanilla().data.length);
         assertTrue(packet.toVanilla().data.length <= PacketLimits.MAX_ENVELOPE_BYTES);
+    }
+
+    private static final class ForeignPacket implements Packet {
+        private final ResourceLocation channel;
+        private final byte[] encoded;
+        private int invocations;
+
+        private ForeignPacket(ResourceLocation channel, byte[] encoded) {
+            this.channel = channel;
+            this.encoded = encoded.clone();
+        }
+
+        @Override
+        public void write(PacketByteBuf buffer) {
+            invocations++;
+            buffer.write(encoded, 0, encoded.length);
+        }
+
+        @Override
+        public void apply(EntityPlayer player) {
+            invocations++;
+            throw new AssertionError("foreign packet apply must stay unreachable");
+        }
+
+        @Override
+        public ResourceLocation getChannel() {
+            invocations++;
+            return channel;
+        }
     }
 }

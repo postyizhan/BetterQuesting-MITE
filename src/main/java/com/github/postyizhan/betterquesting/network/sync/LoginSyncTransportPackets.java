@@ -40,6 +40,20 @@ public final class LoginSyncTransportPackets {
         return packet instanceof RejectedPacket;
     }
 
+    public static Optional<LoginSyncFrame> extract(Packet packet) {
+        if (!(packet instanceof FramePacket framePacket)) {
+            return Optional.empty();
+        }
+        Optional<LoginSyncFrame> decoded = LoginSyncFrameCodec.decode(framePacket.encoded);
+        if (decoded.isEmpty()) {
+            return Optional.empty();
+        }
+        LoginSyncFrame frame = decoded.orElseThrow();
+        ResourceLocation expectedChannel = channel(
+            frame.direction() == LoginSyncFrame.Direction.CLIENT_TO_SERVER);
+        return framePacket.channel == expectedChannel ? Optional.of(frame) : Optional.empty();
+    }
+
     private static Packet outbound(LoginSyncFrame frame, boolean serverbound) {
         ResourceLocation channel = channel(serverbound);
         if (frame == null || frame.direction() != direction(serverbound)) {
