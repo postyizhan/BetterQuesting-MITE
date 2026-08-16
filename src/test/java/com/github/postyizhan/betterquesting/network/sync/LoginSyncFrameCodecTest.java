@@ -5,9 +5,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.postyizhan.betterquesting.network.PacketLimits;
+import com.github.postyizhan.betterquesting.network.fragment.QuestingFragment;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeCapabilities;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeHelloCodec;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -33,6 +36,37 @@ class LoginSyncFrameCodecTest {
     }
 
     @Test
+    void bulkFragmentIsTokenBoundServerToClientAndFillsTheExactEnvelope() {
+        UUID token = UUID.randomUUID();
+        byte[] fragmentBytes = new byte[LoginSyncProtocol.FRAGMENT_LIMITS.maxFragmentBytes()];
+        QuestingFragment fragment = new QuestingFragment(
+            41L, fragmentBytes.length, 0, 1, fragmentBytes);
+        byte[] encodedFragment = LoginSyncProtocol.FRAGMENT_CODEC.encode(fragment);
+        LoginSyncFrame frame = LoginSyncFrame.bulkFragment(token, encodedFragment);
+
+        byte[] encoded = LoginSyncFrameCodec.encode(frame);
+
+        assertEquals(LoginSyncFrame.Direction.SERVER_TO_CLIENT, frame.direction());
+        assertEquals(LoginSyncFrame.Type.BULK_FRAGMENT, frame.type());
+        assertEquals(token, frame.connectionToken());
+        assertArrayEquals(encodedFragment, frame.bulkFragment().orElseThrow());
+        assertEquals(PacketLimits.MAX_ENVELOPE_BYTES, encoded.length);
+        assertEquals(frame, LoginSyncFrameCodec.decode(encoded).orElseThrow());
+        assertThrows(IllegalArgumentException.class, () -> LoginSyncFrameCodec.encode(
+            new LoginSyncFrame(
+                LoginSyncFrame.Direction.CLIENT_TO_SERVER,
+                LoginSyncFrame.Type.BULK_FRAGMENT,
+                token,
+                encodedFragment)));
+        assertThrows(IllegalArgumentException.class, () -> LoginSyncFrameCodec.encode(
+            new LoginSyncFrame(
+                LoginSyncFrame.Direction.SERVER_TO_CLIENT,
+                LoginSyncFrame.Type.BULK_FRAGMENT,
+                token,
+                new byte[encodedFragment.length])));
+    }
+
+    @Test
     void malformedOversizedWrongPayloadAndMismatchedHelloTokenAreRejected() {
         UUID token = UUID.randomUUID();
         LoginSyncFrame frame = LoginSyncFrame.clientHello(new HandshakeHello(
@@ -55,12 +89,23 @@ class LoginSyncFrameCodecTest {
         assertTrue(LoginSyncFrameCodec.decode(unknownVersion).isEmpty());
 
         byte[] unknownType = encoded.clone();
-        unknownType[5] = 3;
+        unknownType[5] = (byte) LoginSyncFrame.Type.values().length;
         assertTrue(LoginSyncFrameCodec.decode(unknownType).isEmpty());
 
         byte[] unknownDirection = encoded.clone();
         unknownDirection[6] = 2;
         assertTrue(LoginSyncFrameCodec.decode(unknownDirection).isEmpty());
+
+        byte[] negativePayloadLength = encoded.clone();
+        ByteBuffer.wrap(negativePayloadLength).putInt(
+            LoginSyncProtocol.LOGIN_FRAME_HEADER_BYTES - Integer.BYTES, -1);
+        assertTrue(LoginSyncFrameCodec.decode(negativePayloadLength).isEmpty());
+
+        byte[] oversizedPayloadLength = encoded.clone();
+        ByteBuffer.wrap(oversizedPayloadLength).putInt(
+            LoginSyncProtocol.LOGIN_FRAME_HEADER_BYTES - Integer.BYTES,
+            LoginSyncFrame.MAX_PAYLOAD_BYTES + 1);
+        assertTrue(LoginSyncFrameCodec.decode(oversizedPayloadLength).isEmpty());
     }
 
     @Test

@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.postyizhan.betterquesting.network.PacketLimits;
+import com.github.postyizhan.betterquesting.network.fragment.QuestingFragment;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeCapabilities;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
 import java.io.ByteArrayInputStream;
@@ -85,6 +86,7 @@ class LoginSyncTransportPacketsTest {
         LoginSyncFrame clientHello = LoginSyncFrame.clientHello(hello());
         LoginSyncFrame serverHello = LoginSyncFrame.serverHello(hello());
         LoginSyncFrame settings = LoginSyncFrame.settings(TOKEN, snapshot());
+        LoginSyncFrame bulkFragment = bulkFragment(TOKEN, 7L, new byte[] {1, 2, 3});
 
         assertRoundTrip(
             clientHello,
@@ -97,6 +99,10 @@ class LoginSyncTransportPacketsTest {
         assertRoundTrip(
             settings,
             LoginSyncTransportPackets.s2c(settings),
+            PacketReader.clientReaders);
+        assertRoundTrip(
+            bulkFragment,
+            LoginSyncTransportPackets.s2c(bulkFragment),
             PacketReader.clientReaders);
     }
 
@@ -164,10 +170,13 @@ class LoginSyncTransportPacketsTest {
         byte[] c2s = LoginSyncFrameCodec.encode(LoginSyncFrame.clientHello(hello()));
         byte[] serverHello = LoginSyncFrameCodec.encode(LoginSyncFrame.serverHello(hello()));
         byte[] settings = LoginSyncFrameCodec.encode(LoginSyncFrame.settings(TOKEN, snapshot()));
+        byte[] bulkFragment = LoginSyncFrameCodec.encode(
+            bulkFragment(TOKEN, 8L, new byte[] {1}));
 
         assertRejected(readClient(c2s));
         assertRejected(readServer(serverHello));
         assertRejected(readServer(settings));
+        assertRejected(readServer(bulkFragment));
     }
 
     @Test
@@ -184,20 +193,8 @@ class LoginSyncTransportPacketsTest {
 
     @Test
     void exactMaximumFrameIsAcceptedAndOneTrailingByteIsRejected() {
-        LoginSettingsSnapshot maximum = new LoginSettingsSnapshot(
-            "p".repeat(LoginSettingsSnapshot.MAX_PACK_NAME_BYTES),
-            1,
-            true,
-            false,
-            false,
-            3,
-            10,
-            "h".repeat(LoginSettingsSnapshot.MAX_HOME_IMAGE_BYTES),
-            0.5F,
-            0F,
-            -128,
-            0);
-        byte[] encoded = LoginSyncFrameCodec.encode(LoginSyncFrame.settings(TOKEN, maximum));
+        byte[] payload = new byte[LoginSyncProtocol.FRAGMENT_LIMITS.maxFragmentBytes()];
+        byte[] encoded = LoginSyncFrameCodec.encode(bulkFragment(TOKEN, 9L, payload));
 
         assertEquals(LoginSyncFrameCodec.MAX_ENCODED_BYTES, encoded.length);
         assertFalse(LoginSyncTransportPackets.isRejected(readClient(encoded)));
@@ -282,8 +279,12 @@ class LoginSyncTransportPacketsTest {
                 0F,
                 -128,
                 0)));
+        Packet s2cBulk = LoginSyncTransportPackets.s2c(bulkFragment(
+            TOKEN,
+            10L,
+            new byte[LoginSyncProtocol.FRAGMENT_LIMITS.maxFragmentBytes()]));
 
-        for (Packet packet : new Packet[]{c2s, s2cHello, s2cSettings}) {
+        for (Packet packet : new Packet[]{c2s, s2cHello, s2cSettings, s2cBulk}) {
             byte[] before = packet.toVanilla().data.clone();
             assertFalse(LoginSyncTransportPackets.isRejected(packet));
             assertDoesNotThrow(() -> packet.apply(null));
@@ -295,6 +296,13 @@ class LoginSyncTransportPacketsTest {
         assertRejected(LoginSyncTransportPackets.s2c(LoginSyncFrame.clientHello(hello())));
         assertRejected(LoginSyncTransportPackets.c2s(null));
         assertRejected(LoginSyncTransportPackets.s2c(null));
+    }
+
+    private static LoginSyncFrame bulkFragment(UUID token, long transferId, byte[] payload) {
+        QuestingFragment fragment = new QuestingFragment(
+            transferId, payload.length, 0, 1, payload);
+        return LoginSyncFrame.bulkFragment(
+            token, LoginSyncProtocol.FRAGMENT_CODEC.encode(fragment));
     }
 
     private static void assertRoundTrip(

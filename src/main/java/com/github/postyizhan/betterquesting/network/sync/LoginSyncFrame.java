@@ -10,8 +10,10 @@ import java.util.UUID;
 /** Immutable protocol envelope used only by the login synchronization coordinator. */
 public final class LoginSyncFrame {
     public static final int MAX_PAYLOAD_BYTES = Math.max(
-        HandshakeHelloCodec.MAX_ENCODED_BYTES,
-        LoginSettingsSnapshotCodec.MAX_ENCODED_BYTES);
+        Math.max(
+            HandshakeHelloCodec.MAX_ENCODED_BYTES,
+            LoginSettingsSnapshotCodec.MAX_ENCODED_BYTES),
+        LoginSyncProtocol.FRAGMENT_CODEC.maxEncodedBytes());
 
     public enum Direction {
         CLIENT_TO_SERVER,
@@ -21,7 +23,8 @@ public final class LoginSyncFrame {
     public enum Type {
         CLIENT_HELLO,
         SERVER_HELLO,
-        SETTINGS
+        SETTINGS,
+        BULK_FRAGMENT
     }
 
     private final Direction direction;
@@ -72,6 +75,14 @@ public final class LoginSyncFrame {
             LoginSettingsSnapshotCodec.encode(Objects.requireNonNull(snapshot, "snapshot")));
     }
 
+    public static LoginSyncFrame bulkFragment(UUID connectionToken, byte[] encodedFragment) {
+        return new LoginSyncFrame(
+            Direction.SERVER_TO_CLIENT,
+            Type.BULK_FRAGMENT,
+            Objects.requireNonNull(connectionToken, "connectionToken"),
+            Objects.requireNonNull(encodedFragment, "encodedFragment"));
+    }
+
     public Direction direction() {
         return direction;
     }
@@ -93,7 +104,7 @@ public final class LoginSyncFrame {
     }
 
     public Optional<HandshakeHello> hello() {
-        if (type == Type.SETTINGS) {
+        if (type != Type.CLIENT_HELLO && type != Type.SERVER_HELLO) {
             return Optional.empty();
         }
         return HandshakeHelloCodec.decode(payload);
@@ -104,6 +115,12 @@ public final class LoginSyncFrame {
             return Optional.empty();
         }
         return LoginSettingsSnapshotCodec.decode(payload);
+    }
+
+    public Optional<byte[]> bulkFragment() {
+        return type == Type.BULK_FRAGMENT
+            ? Optional.of(payload.clone())
+            : Optional.empty();
     }
 
     @Override

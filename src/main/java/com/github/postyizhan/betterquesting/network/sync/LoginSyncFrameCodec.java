@@ -11,7 +11,7 @@ import java.util.UUID;
 public final class LoginSyncFrameCodec {
     private static final int MAGIC = 0x42514c31;
     private static final int WIRE_VERSION = 1;
-    private static final int HEADER_BYTES = Integer.BYTES + 1 + 1 + 1 + Long.BYTES * 2 + Integer.BYTES;
+    private static final int HEADER_BYTES = LoginSyncProtocol.LOGIN_FRAME_HEADER_BYTES;
     public static final int MAX_ENCODED_BYTES = HEADER_BYTES + LoginSyncFrame.MAX_PAYLOAD_BYTES;
 
     private LoginSyncFrameCodec() {
@@ -88,6 +88,9 @@ public final class LoginSyncFrameCodec {
         if (type == LoginSyncFrame.Type.SETTINGS) {
             return LoginSettingsSnapshotCodec.decode(payload).isPresent();
         }
+        if (type == LoginSyncFrame.Type.BULK_FRAGMENT) {
+            return LoginSyncProtocol.FRAGMENT_CODEC.decode(payload).isPresent();
+        }
         Optional<HandshakeHello> hello = HandshakeHelloCodec.decode(payload);
         return hello.isPresent() && connectionToken.equals(hello.orElseThrow().connectionToken());
     }
@@ -99,7 +102,8 @@ public final class LoginSyncFrameCodec {
         return (type == LoginSyncFrame.Type.CLIENT_HELLO
                 && direction == LoginSyncFrame.Direction.CLIENT_TO_SERVER)
             || ((type == LoginSyncFrame.Type.SERVER_HELLO
-                || type == LoginSyncFrame.Type.SETTINGS)
+                || type == LoginSyncFrame.Type.SETTINGS
+                || type == LoginSyncFrame.Type.BULK_FRAGMENT)
                 && direction == LoginSyncFrame.Direction.SERVER_TO_CLIENT);
     }
 }
