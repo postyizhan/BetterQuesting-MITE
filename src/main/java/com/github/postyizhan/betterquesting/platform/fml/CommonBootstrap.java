@@ -21,9 +21,9 @@ import moddedmite.rustedironcore.api.event.events.PlayerLoggedInEvent;
 import moddedmite.rustedironcore.api.event.events.PlayerLoggedOutEvent;
 import moddedmite.rustedironcore.api.event.listener.IInitializationListener;
 import moddedmite.rustedironcore.api.event.listener.IPlayerEventListener;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.ServerPlayer;
 import net.minecraft.server.MinecraftServer;
+import net.xiaoyu233.fml.FishModLoader;
 
 public final class CommonBootstrap {
     private static boolean initialized;
@@ -855,7 +855,7 @@ public final class CommonBootstrap {
     }
 
     private static String currentBuild() {
-        return FabricLoader.getInstance().getModContainer(BetterQuestingConstants.MOD_ID)
+        return FishModLoader.getModContainer(BetterQuestingConstants.MOD_ID)
             .map(container -> container.getMetadata().getVersion().getFriendlyString())
             .orElse("unknown");
     }
