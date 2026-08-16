@@ -1,6 +1,7 @@
 package com.github.postyizhan.betterquesting.platform.fml.client;
 
 import com.github.postyizhan.betterquesting.BetterQuestingMod;
+import com.github.postyizhan.betterquesting.client.state.ClientQuestSettingsState;
 import com.github.postyizhan.betterquesting.network.fragment.FragmentAssemblyLimits;
 import com.github.postyizhan.betterquesting.network.fragment.QuestingFragment;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
@@ -36,14 +37,9 @@ public final class LoginSyncClientWiring {
     }
 
     private static final LoginSyncClientWiring PRODUCTION = new LoginSyncClientWiring(
-        new LoginSyncConnectionOwner(
-            LoginSyncSession.Role.CLIENT,
-            LoginSyncProtocol.CAPABILITIES,
-            LoginSyncProtocol.LIMITS),
+        ClientQuestSettingsState.INSTANCE,
         () -> LoginSyncTransportPackets.registerClient(LoginSyncClientWiring::receiveFromRic),
-        Network::sendToServer,
-        LoginSyncProtocol.FRAGMENT_LIMITS,
-        ignored -> { });
+        Network::sendToServer);
 
     static {
         TickHandler.getInstance().registerClientTickHandler(
@@ -69,6 +65,19 @@ public final class LoginSyncClientWiring {
     private final IdentityHashMap<Object, Binding> bindings = new IdentityHashMap<>();
     private boolean readerRegistered;
     private boolean readerRegistrationInProgress;
+
+    LoginSyncClientWiring(
+        ClientQuestSettingsState settingsState,
+        Runnable readerRegistration,
+        Sender sender
+    ) {
+        this(
+            settingsOwner(settingsState),
+            readerRegistration,
+            sender,
+            LoginSyncProtocol.FRAGMENT_LIMITS,
+            ignored -> { });
+    }
 
     LoginSyncClientWiring(
         LoginSyncConnectionOwner owner,
@@ -98,6 +107,33 @@ public final class LoginSyncClientWiring {
         this.bulkPublication = Objects.requireNonNull(bulkPublication, "bulkPublication");
         if (owner.role() != LoginSyncSession.Role.CLIENT) {
             throw new IllegalArgumentException("client wiring requires a client connection owner");
+        }
+    }
+
+    private static LoginSyncConnectionOwner settingsOwner(
+        ClientQuestSettingsState settingsState
+    ) {
+        Objects.requireNonNull(settingsState, "settingsState");
+        return new LoginSyncConnectionOwner(
+            LoginSyncSession.Role.CLIENT,
+            (role, handler) -> createSettingsSession(role, settingsState));
+    }
+
+    private static LoginSyncSession createSettingsSession(
+        LoginSyncSession.Role role,
+        ClientQuestSettingsState settingsState
+    ) {
+        ClientQuestSettingsState.ConnectionLease lease = settingsState.openConnectionLease();
+        try {
+            return new LoginSyncSession(
+                role,
+                LoginSyncProtocol.CAPABILITIES,
+                LoginSyncProtocol.LIMITS,
+                lease::publish,
+                lease::close);
+        } catch (RuntimeException | Error failure) {
+            lease.close();
+            throw failure;
         }
     }
 

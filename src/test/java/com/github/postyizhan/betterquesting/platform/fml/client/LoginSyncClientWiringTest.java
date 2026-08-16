@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.postyizhan.betterquesting.client.state.ClientQuestSettingsState;
 import com.github.postyizhan.betterquesting.network.fragment.FragmentAssemblyLimits;
 import com.github.postyizhan.betterquesting.network.fragment.QuestingFragment;
 import com.github.postyizhan.betterquesting.network.fragment.QuestingFragmentCodec;
@@ -29,6 +31,127 @@ import moddedmite.rustedironcore.network.Packet;
 import org.junit.jupiter.api.Test;
 
 public class LoginSyncClientWiringTest {
+    @Test
+    void productionStatePublishesOnlyAfterHandshakeAndTracksTheConnectionLease() {
+        ClientQuestSettingsState state = new ClientQuestSettingsState();
+        List<Packet> sent = new ArrayList<>();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(state, () -> { }, sent::add);
+        Object handler = new Object();
+        Object oldWorld = new Object();
+        Object newWorld = new Object();
+        wiring.login(handler);
+        LoginSyncFrame hello = LoginSyncTransportPackets.extract(sent.get(0)).orElseThrow();
+        LoginSettingsSnapshot published = snapshot("client-state");
+
+        wiring.receive(handler, LoginSyncFrame.settings(hello.connectionToken(), published));
+        assertTrue(state.current().isEmpty());
+
+        LoginSyncSession server = server();
+        wiring.receive(handler, server.receive(hello).response().orElseThrow());
+        wiring.receive(handler, server.sendSettings(published));
+        wiring.receive(handler, server.sendSettings(published));
+
+        assertEquals(published, state.current().orElseThrow());
+        wiring.worldChanged(oldWorld, newWorld);
+        assertEquals(published, state.current().orElseThrow());
+        wiring.terminal(handler);
+        assertTrue(state.current().isEmpty());
+    }
+
+    @Test
+    void productionStateReconnectPublishesReplacementAndIgnoresOldTeardown() {
+        ClientQuestSettingsState state = new ClientQuestSettingsState();
+        List<Packet> sent = new ArrayList<>();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(state, () -> { }, sent::add);
+        Object oldHandler = new Object();
+        Object newHandler = new Object();
+
+        wiring.login(oldHandler);
+        LoginSyncFrame oldHello = LoginSyncTransportPackets.extract(sent.get(0)).orElseThrow();
+        LoginSyncSession oldServer = server();
+        wiring.receive(oldHandler, oldServer.receive(oldHello).response().orElseThrow());
+        wiring.receive(oldHandler, oldServer.sendSettings(snapshot("old-state")));
+        assertEquals(snapshot("old-state"), state.current().orElseThrow());
+
+        wiring.login(newHandler);
+        assertTrue(state.current().isEmpty());
+        LoginSyncFrame newHello = LoginSyncTransportPackets.extract(sent.get(1)).orElseThrow();
+        LoginSyncSession newServer = server();
+        wiring.receive(newHandler, newServer.receive(newHello).response().orElseThrow());
+        LoginSettingsSnapshot replacement = snapshot("new-state");
+        wiring.receive(newHandler, newServer.sendSettings(replacement));
+
+        wiring.terminal(oldHandler);
+        wiring.receive(oldHandler, oldServer.sendSettings(snapshot("delayed-old")));
+        assertEquals(replacement, state.current().orElseThrow());
+        wiring.worldUnload();
+        assertTrue(state.current().isEmpty());
+    }
+
+    @Test
+    void productionStateFailureAndInvalidInputsPublishNothing() {
+        ClientQuestSettingsState registrationState = new ClientQuestSettingsState();
+        LoginSyncClientWiring registrationFailure = new LoginSyncClientWiring(
+            registrationState,
+            () -> {
+                throw new IllegalStateException("registration failed");
+            },
+            packet -> { });
+        assertDoesNotThrow(() -> registrationFailure.login(new Object()));
+        assertTrue(registrationState.current().isEmpty());
+
+        ClientQuestSettingsState sendState = new ClientQuestSettingsState();
+        LoginSyncClientWiring sendFailure = new LoginSyncClientWiring(
+            sendState, () -> { }, packet -> {
+                throw new IllegalStateException("send failed");
+            });
+        assertDoesNotThrow(() -> sendFailure.login(new Object()));
+        assertTrue(sendState.current().isEmpty());
+
+        ClientQuestSettingsState inputState = new ClientQuestSettingsState();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(
+            inputState, () -> { }, packet -> { });
+        Object handler = new Object();
+        wiring.login(handler);
+        LoginSyncFrame hello = wiring.outboundHello(handler).orElseThrow();
+        wiring.receive(handler, LoginSyncFrame.settings(
+            hello.connectionToken(), snapshot("out-of-order")));
+        assertTrue(inputState.current().isEmpty());
+
+        LoginSyncSession malformedServer = server();
+        wiring.receive(handler, malformedServer.receive(hello).response().orElseThrow());
+        wiring.receive(handler, new LoginSyncFrame(
+            LoginSyncFrame.Direction.SERVER_TO_CLIENT,
+            LoginSyncFrame.Type.SETTINGS,
+            hello.connectionToken(),
+            new byte[] {1, 2, 3}));
+        assertThrows(IllegalArgumentException.class, () -> new LoginSyncFrame(
+            LoginSyncFrame.Direction.SERVER_TO_CLIENT,
+            LoginSyncFrame.Type.SETTINGS,
+            hello.connectionToken(),
+            new byte[LoginSyncFrame.MAX_PAYLOAD_BYTES + 1]));
+        assertTrue(inputState.current().isEmpty());
+
+        wiring.receive(handler, LoginSyncFrame.settings(
+            UUID.randomUUID(), snapshot("wrong-token")));
+        assertTrue(inputState.current().isEmpty());
+
+        wiring.login(handler);
+        LoginSyncFrame failedHello = wiring.outboundHello(handler).orElseThrow();
+        HandshakeCapabilities incompatible = new HandshakeCapabilities(2, 1, 0L, 0L);
+        wiring.receive(handler, LoginSyncFrame.serverHello(new HandshakeHello(
+            failedHello.connectionToken(), incompatible)));
+        assertTrue(inputState.current().isEmpty());
+
+        wiring.login(handler);
+        LoginSyncFrame conflictHello = wiring.outboundHello(handler).orElseThrow();
+        LoginSyncSession server = server();
+        wiring.receive(handler, server.receive(conflictHello).response().orElseThrow());
+        wiring.receive(handler, server.sendSettings(snapshot("first")));
+        wiring.receive(handler, server.sendSettings(snapshot("conflict")));
+        assertTrue(inputState.current().isEmpty());
+    }
+
     @Test
     void readerRegistrationPrecedesOneHelloSendForTheExactHandler() {
         List<String> lifecycle = new ArrayList<>();
@@ -500,7 +623,11 @@ public class LoginSyncClientWiringTest {
                 role,
                 LoginSyncProtocol.CAPABILITIES,
                 LoginSyncProtocol.LIMITS,
-                ignored -> { },
+                ignored -> {
+                    if (reference.get().isLifecycleLockHeldByCurrentThread()) {
+                        lockedCallbacks.incrementAndGet();
+                    }
+                },
                 () -> {
                     if (reference.get().isLifecycleLockHeldByCurrentThread()) {
                         lockedCallbacks.incrementAndGet();
