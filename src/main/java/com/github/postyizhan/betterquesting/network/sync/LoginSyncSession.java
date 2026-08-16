@@ -4,6 +4,8 @@ import com.github.postyizhan.betterquesting.network.handshake.HandshakeCapabilit
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeLimits;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeSession;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -81,7 +83,9 @@ public final class LoginSyncSession implements AutoCloseable {
     private LoginSyncFrame serverHelloFrame;
     private LoginSettingsSnapshot publishedSnapshot;
     private boolean clearCalled;
+    private boolean clearPending;
     private boolean applying;
+    private final List<Runnable> closeHooks = new ArrayList<>();
 
     public LoginSyncSession(
         Role role,
@@ -183,19 +187,24 @@ public final class LoginSyncSession implements AutoCloseable {
 
     public ReceiveResult receive(LoginSyncFrame frame) {
         checkOwner();
+        ReceiveStep step;
+        CloseActions closeActions;
         synchronized (lifecycleLock) {
             if (state == State.CLOSED) {
-                return rejected(RejectionReason.CLOSED);
+                step = ReceiveStep.immediate(rejected(RejectionReason.CLOSED));
+            } else if (frame == null) {
+                step = ReceiveStep.immediate(rejected(RejectionReason.MALFORMED));
+            } else if (frame.payload().length > LoginSyncFrame.MAX_PAYLOAD_BYTES) {
+                step = ReceiveStep.immediate(rejected(RejectionReason.OVERSIZED));
+            } else {
+                step = role == Role.SERVER ? receiveOnServer(frame) : receiveOnClient(frame);
             }
-            if (frame == null) {
-                return rejected(RejectionReason.MALFORMED);
-            }
-            if (frame.payload().length > LoginSyncFrame.MAX_PAYLOAD_BYTES) {
-                return rejected(RejectionReason.OVERSIZED);
-            }
-
-            return role == Role.SERVER ? receiveOnServer(frame) : receiveOnClient(frame);
+            closeActions = drainCloseActionsLocked();
         }
+        runCloseActions(closeActions);
+        return step.applicationCandidate() == null
+            ? step.result()
+            : applySettings(step.applicationCandidate());
     }
 
     public State state() {
@@ -244,6 +253,21 @@ public final class LoginSyncSession implements AutoCloseable {
         }
     }
 
+    /** Adds connection-owned cleanup that runs exactly once when this session closes. */
+    public void addCloseHook(Runnable hook) {
+        Objects.requireNonNull(hook, "hook");
+        boolean runNow;
+        synchronized (lifecycleLock) {
+            runNow = state == State.CLOSED && !applying;
+            if (!runNow) {
+                closeHooks.add(hook);
+            }
+        }
+        if (runNow) {
+            runCloseHook(hook);
+        }
+    }
+
     /** Invalidates this connection; repeated teardown is deliberately idempotent. */
     public void disconnect() {
         close();
@@ -256,35 +280,37 @@ public final class LoginSyncSession implements AutoCloseable {
 
     @Override
     public void close() {
+        CloseActions closeActions;
         synchronized (lifecycleLock) {
-            if (state == State.CLOSED) {
-                return;
-            }
-            state = State.CLOSED;
-            handshake.close();
-            localHello = null;
-            connectionToken = null;
-            serverHelloFrame = null;
-            publishedSnapshot = null;
-            clearOnce();
+            closeLocked();
+            closeActions = drainCloseActionsLocked();
+        }
+        runCloseActions(closeActions);
+    }
+
+    private static void runCloseHook(Runnable hook) {
+        try {
+            hook.run();
+        } catch (RuntimeException | Error ignored) {
+            // Teardown must still invalidate the connection if a cleanup consumer fails.
         }
     }
 
-    private ReceiveResult receiveOnServer(LoginSyncFrame frame) {
+    private ReceiveStep receiveOnServer(LoginSyncFrame frame) {
         if (frame.direction() != LoginSyncFrame.Direction.CLIENT_TO_SERVER) {
-            return rejected(RejectionReason.WRONG_DIRECTION);
+            return ReceiveStep.immediate(rejected(RejectionReason.WRONG_DIRECTION));
         }
         if (frame.type() != LoginSyncFrame.Type.CLIENT_HELLO) {
-            return rejected(RejectionReason.OUT_OF_ORDER);
+            return ReceiveStep.immediate(rejected(RejectionReason.OUT_OF_ORDER));
         }
 
         Optional<HandshakeHello> decodedHello = frame.hello();
         if (decodedHello.isEmpty()) {
-            return rejected(RejectionReason.MALFORMED);
+            return ReceiveStep.immediate(rejected(RejectionReason.MALFORMED));
         }
         HandshakeHello remoteHello = decodedHello.orElseThrow();
         if (!frame.connectionToken().equals(remoteHello.connectionToken())) {
-            return rejected(RejectionReason.WRONG_TOKEN);
+            return ReceiveStep.immediate(rejected(RejectionReason.WRONG_TOKEN));
         }
 
         if (state == State.NEW) {
@@ -292,55 +318,55 @@ public final class LoginSyncSession implements AutoCloseable {
             localHello = handshake.start(connectionToken);
             HandshakeSession.ReceiveResult handshakeResult = handshake.receive(remoteHello);
             if (handshakeResult.outcome() != HandshakeSession.ReceiveOutcome.READY) {
-                return handshakeRejected();
+                return ReceiveStep.immediate(handshakeRejected());
             }
             state = State.READY;
             serverHelloFrame = LoginSyncFrame.serverHello(localHello);
-            return accepted(serverHelloFrame);
+            return ReceiveStep.immediate(accepted(serverHelloFrame));
         }
         if (state == State.FAILED) {
-            return rejected(RejectionReason.HANDSHAKE_REJECTED);
+            return ReceiveStep.immediate(rejected(RejectionReason.HANDSHAKE_REJECTED));
         }
         if (!connectionToken.equals(remoteHello.connectionToken())) {
-            return rejected(RejectionReason.WRONG_TOKEN);
+            return ReceiveStep.immediate(rejected(RejectionReason.WRONG_TOKEN));
         }
         if (connectionToken.equals(remoteHello.connectionToken())
             && localHello != null && handshake.receive(remoteHello).outcome()
                 == HandshakeSession.ReceiveOutcome.DUPLICATE) {
-            return result(Outcome.DUPLICATE, null, serverHelloFrame);
+            return ReceiveStep.immediate(result(Outcome.DUPLICATE, null, serverHelloFrame));
         }
-        return conflict();
+        return ReceiveStep.immediate(conflict());
     }
 
-    private ReceiveResult receiveOnClient(LoginSyncFrame frame) {
+    private ReceiveStep receiveOnClient(LoginSyncFrame frame) {
         if (frame.direction() != LoginSyncFrame.Direction.SERVER_TO_CLIENT) {
-            return rejected(RejectionReason.WRONG_DIRECTION);
+            return ReceiveStep.immediate(rejected(RejectionReason.WRONG_DIRECTION));
         }
         if (frame.type() != LoginSyncFrame.Type.SERVER_HELLO
             && frame.type() != LoginSyncFrame.Type.SETTINGS) {
-            return rejected(RejectionReason.OUT_OF_ORDER);
+            return ReceiveStep.immediate(rejected(RejectionReason.OUT_OF_ORDER));
         }
         if (state == State.NEW) {
-            return rejected(RejectionReason.OUT_OF_ORDER);
+            return ReceiveStep.immediate(rejected(RejectionReason.OUT_OF_ORDER));
         }
         if (state == State.FAILED) {
-            return rejected(RejectionReason.HANDSHAKE_REJECTED);
+            return ReceiveStep.immediate(rejected(RejectionReason.HANDSHAKE_REJECTED));
         }
         if (connectionToken == null || !connectionToken.equals(frame.connectionToken())) {
-            return rejected(RejectionReason.WRONG_TOKEN);
+            return ReceiveStep.immediate(rejected(RejectionReason.WRONG_TOKEN));
         }
 
         if (frame.type() == LoginSyncFrame.Type.SERVER_HELLO) {
-            return receiveServerHello(frame);
+            return ReceiveStep.immediate(receiveServerHello(frame));
         }
         if (state != State.READY && state != State.PUBLISHED) {
-            return rejected(RejectionReason.OUT_OF_ORDER);
+            return ReceiveStep.immediate(rejected(RejectionReason.OUT_OF_ORDER));
         }
         Optional<LoginSettingsSnapshot> settings = frame.settings();
         if (settings.isEmpty()) {
-            return rejected(RejectionReason.INVALID_SETTINGS);
+            return ReceiveStep.immediate(rejected(RejectionReason.INVALID_SETTINGS));
         }
-        return receiveSettings(settings.orElseThrow());
+        return prepareSettings(settings.orElseThrow());
     }
 
     private ReceiveResult receiveServerHello(LoginSyncFrame frame) {
@@ -371,42 +397,81 @@ public final class LoginSyncSession implements AutoCloseable {
         return accepted(null);
     }
 
-    private ReceiveResult receiveSettings(LoginSettingsSnapshot candidate) {
+    private ReceiveStep prepareSettings(LoginSettingsSnapshot candidate) {
         if (applying) {
-            close();
-            return rejected(RejectionReason.CLOSED);
+            closeLocked();
+            return ReceiveStep.immediate(rejected(RejectionReason.CLOSED));
         }
         if (publishedSnapshot != null) {
-            return publishedSnapshot.equals(candidate) ? result(Outcome.DUPLICATE, null, null) : conflict();
+            return ReceiveStep.immediate(publishedSnapshot.equals(candidate)
+                ? result(Outcome.DUPLICATE, null, null)
+                : conflict());
         }
         applying = true;
+        return ReceiveStep.application(candidate);
+    }
+
+    private ReceiveResult applySettings(LoginSettingsSnapshot candidate) {
+        CloseActions closeActions = null;
+        synchronized (lifecycleLock) {
+            if (state == State.CLOSED) {
+                applying = false;
+                closeActions = drainCloseActionsLocked();
+            }
+        }
+        if (closeActions != null) {
+            runCloseActions(closeActions);
+            return rejected(RejectionReason.CLOSED);
+        }
         try {
             application.apply(candidate);
         } catch (RuntimeException applicationFailure) {
-            return state == State.CLOSED
-                ? rejected(RejectionReason.CLOSED)
-                : result(Outcome.APPLICATION_FAILED, null, null);
-        } finally {
-            applying = false;
-        }
-        if (state != State.READY || publishedSnapshot != null) {
-            if (state != State.CLOSED) {
-                close();
+            return finishSettingsApplication(candidate, false);
+        } catch (Error applicationFailure) {
+            CloseActions errorCloseActions;
+            synchronized (lifecycleLock) {
+                applying = false;
+                errorCloseActions = drainCloseActionsLocked();
             }
-            return rejected(RejectionReason.CLOSED);
+            runCloseActions(errorCloseActions);
+            throw applicationFailure;
         }
-        publishedSnapshot = candidate;
-        state = State.PUBLISHED;
-        return result(Outcome.PUBLISHED, null, null);
+        return finishSettingsApplication(candidate, true);
+    }
+
+    private ReceiveResult finishSettingsApplication(
+        LoginSettingsSnapshot candidate,
+        boolean succeeded
+    ) {
+        ReceiveResult result;
+        CloseActions closeActions;
+        synchronized (lifecycleLock) {
+            applying = false;
+            if (state == State.CLOSED) {
+                result = rejected(RejectionReason.CLOSED);
+            } else if (!succeeded) {
+                result = result(Outcome.APPLICATION_FAILED, null, null);
+            } else if (state != State.READY || publishedSnapshot != null) {
+                closeLocked();
+                result = rejected(RejectionReason.CLOSED);
+            } else {
+                publishedSnapshot = candidate;
+                state = State.PUBLISHED;
+                result = result(Outcome.PUBLISHED, null, null);
+            }
+            closeActions = drainCloseActionsLocked();
+        }
+        runCloseActions(closeActions);
+        return result;
     }
 
     private ReceiveResult conflict() {
-        close();
+        closeLocked();
         return result(Outcome.CONFLICT, RejectionReason.CONFLICT, null);
     }
 
     private ReceiveResult handshakeRejected() {
-        close();
+        closeLocked();
         return rejected(RejectionReason.HANDSHAKE_REJECTED);
     }
 
@@ -429,11 +494,45 @@ public final class LoginSyncSession implements AutoCloseable {
             Optional.ofNullable(response));
     }
 
-    private void clearOnce() {
-        if (clearCalled) {
+    private void closeLocked() {
+        if (state == State.CLOSED) {
             return;
         }
-        clearCalled = true;
+        state = State.CLOSED;
+        handshake.close();
+        localHello = null;
+        connectionToken = null;
+        serverHelloFrame = null;
+        publishedSnapshot = null;
+        if (!clearCalled) {
+            clearCalled = true;
+            clearPending = true;
+        }
+    }
+
+    private CloseActions drainCloseActionsLocked() {
+        if (applying) {
+            return new CloseActions(false, List.of());
+        }
+        boolean clear = clearPending;
+        clearPending = false;
+        List<Runnable> hooks = state == State.CLOSED ? List.copyOf(closeHooks) : List.of();
+        if (state == State.CLOSED) {
+            closeHooks.clear();
+        }
+        return new CloseActions(clear, hooks);
+    }
+
+    private void runCloseActions(CloseActions closeActions) {
+        if (closeActions.clearPublication()) {
+            runClearPublication();
+        }
+        for (Runnable hook : closeActions.hooks()) {
+            runCloseHook(hook);
+        }
+    }
+
+    private void runClearPublication() {
         try {
             clearPublication.run();
         } catch (RuntimeException ignored) {
@@ -450,6 +549,25 @@ public final class LoginSyncSession implements AutoCloseable {
     private void checkOwner() {
         if (Thread.currentThread() != owner) {
             throw new IllegalStateException("login sync session accessed from a non-owner thread");
+        }
+    }
+
+    private record ReceiveStep(
+        ReceiveResult result,
+        LoginSettingsSnapshot applicationCandidate
+    ) {
+        private static ReceiveStep immediate(ReceiveResult result) {
+            return new ReceiveStep(Objects.requireNonNull(result, "result"), null);
+        }
+
+        private static ReceiveStep application(LoginSettingsSnapshot candidate) {
+            return new ReceiveStep(null, Objects.requireNonNull(candidate, "candidate"));
+        }
+    }
+
+    private record CloseActions(boolean clearPublication, List<Runnable> hooks) {
+        private CloseActions {
+            Objects.requireNonNull(hooks, "hooks");
         }
     }
 }
