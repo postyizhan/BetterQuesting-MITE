@@ -7,10 +7,14 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.postyizhan.betterquesting.api.storage.ILifeDatabase;
 import com.github.postyizhan.betterquesting.network.fragment.FragmentAssemblyLimits;
 import com.github.postyizhan.betterquesting.network.fragment.QuestingFragmentCodec;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeCapabilities;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
+import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayload;
+import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayloadCodec;
+import com.github.postyizhan.betterquesting.network.sync.LoginLifeSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncBulkSyncOrchestrator;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncConnectionOwner;
@@ -18,23 +22,29 @@ import com.github.postyizhan.betterquesting.network.sync.LoginSyncFrame;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncProtocol;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncSession;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncTransportPackets;
+import com.github.postyizhan.betterquesting.platform.api.PlayerIdentity;
+import com.github.postyizhan.betterquesting.platform.api.PlayerIdentityResolution;
 import com.github.postyizhan.betterquesting.platform.fml.client.LoginSyncClientWiringTest.ReplayFixture;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import moddedmite.rustedironcore.network.Packet;
+import net.minecraft.NBTTagCompound;
 import org.junit.jupiter.api.Test;
 
 class LoginSyncServerWiringTest {
     private static final UUID TOKEN =
         UUID.fromString("00000000-0000-0000-0000-000000000041");
+    private static final UUID PLAYER_ID =
+        UUID.fromString("00000000-0000-0000-0000-000000000042");
 
     @Test
     void protocolVersionOneClaimsNoFeatures() {
         assertEquals(1, LoginSyncProtocol.CAPABILITIES.protocolVersion());
-        assertEquals(1, LoginSyncProtocol.CAPABILITIES.dataFormatVersion());
+        assertEquals(2, LoginSyncProtocol.CAPABILITIES.dataFormatVersion());
         assertEquals(0L, LoginSyncProtocol.CAPABILITIES.supportedFeatureBits());
         assertEquals(0L, LoginSyncProtocol.CAPABILITIES.requiredFeatureBits());
         assertEquals(0L, LoginSyncProtocol.LIMITS.knownFeatureBits());
@@ -45,6 +55,76 @@ class LoginSyncServerWiringTest {
             LoginSyncProtocol.LOGIN_FRAME_HEADER_BYTES
                 + LoginSyncProtocol.FRAGMENT_WIRE_HEADER_BYTES
                 + LoginSyncProtocol.FRAGMENT_LIMITS.maxFragmentBytes());
+    }
+
+    @Test
+    void typedLifeCapturePreservesStoredValueAndUsesTheCanonicalBulkEnvelope() {
+        LoginSyncConnectionOwner owner = owner(LoginSyncSession.Role.SERVER);
+        List<LoginSyncFrame> sent = new ArrayList<>();
+        ILifeDatabase lives = livesReturning(Integer.MIN_VALUE);
+        LoginSyncServerWiring wiring = new LoginSyncServerWiring(
+            owner,
+            (recipient, packet) -> sent.add(LoginSyncTransportPackets.extract(packet).orElseThrow()),
+            (server, handler, recipient) -> snapshot("life"),
+            (server, handler, recipient) -> List.of(),
+            (server, handler, recipient) -> LoginSyncServerWiring.captureLifePayload(
+                PlayerIdentityResolution.local(new PlayerIdentity(PLAYER_ID, "alice")), lives),
+            LoginSyncProtocol.FRAGMENT_LIMITS);
+        Object server = new Object();
+        Object handler = new Object();
+
+        wiring.bind(server, handler);
+        wiring.receive(server, handler, new Object(), LoginSyncFrame.clientHello(
+            new HandshakeHello(TOKEN, LoginSyncProtocol.CAPABILITIES)));
+
+        assertEquals(3, sent.size());
+        assertEquals(LoginSyncFrame.Type.SERVER_HELLO, sent.get(0).type());
+        assertEquals(LoginSyncFrame.Type.SETTINGS, sent.get(1).type());
+        byte[] fragmentBytes = sent.get(2).bulkFragment().orElseThrow();
+        byte[] envelopeBytes = LoginSyncProtocol.FRAGMENT_CODEC.decode(fragmentBytes)
+            .orElseThrow().bytes();
+        LoginBulkPayload envelope = LoginBulkPayloadCodec.decode(envelopeBytes).orElseThrow();
+        assertEquals("betterquesting:life_sync", envelope.id());
+        assertEquals(new LoginLifeSnapshot(Integer.MIN_VALUE), envelope.life());
+        assertTrue(owner.current(server, handler).isPresent());
+    }
+
+    @Test
+    void unresolvedIdentityOmitsOnlyLifeWhileSettingsStillComplete() {
+        LoginSyncConnectionOwner owner = owner(LoginSyncSession.Role.SERVER);
+        List<LoginSyncFrame> sent = new ArrayList<>();
+        LoginSyncServerWiring wiring = new LoginSyncServerWiring(
+            owner,
+            (recipient, packet) -> sent.add(LoginSyncTransportPackets.extract(packet).orElseThrow()),
+            (server, handler, recipient) -> snapshot("settings-only"),
+            (server, handler, recipient) -> List.of(),
+            (server, handler, recipient) -> LoginSyncServerWiring.captureLifePayload(
+                PlayerIdentityResolution.unsupportedUsername(null), livesReturning(7)),
+            LoginSyncProtocol.FRAGMENT_LIMITS);
+        Object server = new Object();
+        Object handler = new Object();
+
+        wiring.bind(server, handler);
+        wiring.receive(server, handler, new Object(), LoginSyncFrame.clientHello(
+            new HandshakeHello(TOKEN, LoginSyncProtocol.CAPABILITIES)));
+
+        assertEquals(List.of(LoginSyncFrame.Type.SERVER_HELLO, LoginSyncFrame.Type.SETTINGS),
+            sent.stream().map(LoginSyncFrame::type).toList());
+        assertTrue(owner.current(server, handler).isPresent());
+    }
+
+    @Test
+    void preLifeDataFormatPeerCannotNegotiate() {
+        LoginSyncConnectionOwner owner = owner(LoginSyncSession.Role.SERVER);
+        LoginSyncServerWiring wiring = new LoginSyncServerWiring(owner, (recipient, packet) -> { });
+        Object server = new Object();
+        Object handler = new Object();
+        wiring.bind(server, handler);
+
+        wiring.receive(server, handler, new Object(), LoginSyncFrame.clientHello(
+            new HandshakeHello(TOKEN, new HandshakeCapabilities(1, 1, 0L, 0L))));
+
+        assertTrue(owner.current(server, handler).isEmpty());
     }
 
     @Test
@@ -278,6 +358,12 @@ class LoginSyncServerWiringTest {
                 }
                 return List.of(new byte[] {1});
             },
+            (server, handler, recipient) -> {
+                if (reference.get().isLifecycleLockHeldByCurrentThread()) {
+                    lockedCallbacks.incrementAndGet();
+                }
+                return Optional.empty();
+            },
             limits());
         reference.set(wiring);
         Object server = new Object();
@@ -509,6 +595,34 @@ class LoginSyncServerWiringTest {
         return new LoginSettingsSnapshot(
             name, 1, true, false, false, 3, 10,
             "betterquesting:textures/gui/default_title.png", 0.5F, 0F, -128, 0);
+    }
+
+    private static ILifeDatabase livesReturning(int value) {
+        return new ILifeDatabase() {
+            @Override
+            public int getLives(UUID uuid) {
+                assertEquals(PLAYER_ID, uuid);
+                return value;
+            }
+
+            @Override
+            public void setLives(UUID uuid, int lives) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public NBTTagCompound writeToNBT(NBTTagCompound nbt, List<UUID> users) {
+                return nbt;
+            }
+
+            @Override
+            public void readFromNBT(NBTTagCompound nbt, boolean merge) {
+            }
+
+            @Override
+            public void reset() {
+            }
+        };
     }
 
     private record Sent(Object recipient, Packet packet) {

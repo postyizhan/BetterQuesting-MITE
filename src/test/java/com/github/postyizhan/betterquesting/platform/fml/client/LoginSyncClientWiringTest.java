@@ -8,12 +8,17 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.postyizhan.betterquesting.client.state.ClientLifeState;
 import com.github.postyizhan.betterquesting.client.state.ClientQuestSettingsState;
+import com.github.postyizhan.betterquesting.network.fragment.BoundedFragmenter;
 import com.github.postyizhan.betterquesting.network.fragment.FragmentAssemblyLimits;
 import com.github.postyizhan.betterquesting.network.fragment.QuestingFragment;
 import com.github.postyizhan.betterquesting.network.fragment.QuestingFragmentCodec;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeCapabilities;
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
+import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayload;
+import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayloadCodec;
+import com.github.postyizhan.betterquesting.network.sync.LoginLifeSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncBulkSyncOrchestrator;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncConnectionOwner;
@@ -21,6 +26,7 @@ import com.github.postyizhan.betterquesting.network.sync.LoginSyncFrame;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncProtocol;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncSession;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncTransportPackets;
+import com.github.postyizhan.betterquesting.storage.LifeDatabase;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -31,6 +37,9 @@ import moddedmite.rustedironcore.network.Packet;
 import org.junit.jupiter.api.Test;
 
 public class LoginSyncClientWiringTest {
+    private static final UUID AUTHORITATIVE_ID =
+        UUID.fromString("00000000-0000-0000-0000-000000000051");
+
     @Test
     void productionStatePublishesOnlyAfterHandshakeAndTracksTheConnectionLease() {
         ClientQuestSettingsState state = new ClientQuestSettingsState();
@@ -86,6 +95,180 @@ public class LoginSyncClientWiringTest {
         assertEquals(replacement, state.current().orElseThrow());
         wiring.worldUnload();
         assertTrue(state.current().isEmpty());
+    }
+
+    @Test
+    void typedLifePublishesOnlyAfterSettingsAndFragmentedReassemblyWithoutDatabaseWrites() {
+        ClientQuestSettingsState settings = new ClientQuestSettingsState();
+        ClientLifeState life = new ClientLifeState();
+        FragmentAssemblyLimits limits = lifeLimits();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(
+            settings, life, () -> { }, packet -> { }, limits);
+        Object handler = new Object();
+        int authoritativeLives = LifeDatabase.INSTANCE.getLives(AUTHORITATIVE_ID);
+        try {
+            wiring.login(handler);
+            LoginSyncFrame prematureHello = wiring.outboundHello(handler).orElseThrow();
+            sendBulk(wiring, handler, prematureHello.connectionToken(), limits,
+                70L, lifeEnvelope(99), 0L);
+            assertTrue(settings.current().isEmpty());
+            assertTrue(life.current().isEmpty());
+
+            wiring.login(handler);
+            LoginSyncFrame hello = wiring.outboundHello(handler).orElseThrow();
+            LoginSyncSession server = server();
+            wiring.receive(handler, server.receive(hello).response().orElseThrow());
+            wiring.receive(handler, server.sendSettings(snapshot("typed-life")));
+            byte[] encoded = lifeEnvelope(-17);
+            List<QuestingFragment> fragments = new BoundedFragmenter(limits).split(71L, encoded);
+            QuestingFragmentCodec codec = new QuestingFragmentCodec(limits);
+
+            long nowNanos = 0L;
+            for (int index = fragments.size() - 1; index > 0; index--) {
+                wiring.receive(handler, LoginSyncFrame.bulkFragment(
+                    hello.connectionToken(), codec.encode(fragments.get(index))), nowNanos++);
+                assertTrue(life.current().isEmpty());
+            }
+            wiring.receive(handler, LoginSyncFrame.bulkFragment(
+                hello.connectionToken(), codec.encode(fragments.get(0))), nowNanos);
+
+            assertEquals(-17, life.current().orElseThrow().lives());
+            assertEquals(snapshot("typed-life"), settings.current().orElseThrow());
+            assertEquals(authoritativeLives, LifeDatabase.INSTANCE.getLives(AUTHORITATIVE_ID));
+        } finally {
+            wiring.worldUnload();
+            LifeDatabase.INSTANCE.reset();
+        }
+    }
+
+    @Test
+    void exactLifeDuplicateIsIdempotentWhileConflictAndMalformedPayloadFailClosed() {
+        ClientQuestSettingsState settings = new ClientQuestSettingsState();
+        ClientLifeState life = new ClientLifeState();
+        FragmentAssemblyLimits limits = lifeLimits();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(
+            settings, life, () -> { }, packet -> { }, limits);
+        Object handler = new Object();
+        LoginSyncFrame hello = readyTypedClient(wiring, handler, "duplicates");
+
+        sendBulk(wiring, handler, hello.connectionToken(), limits, 81L, lifeEnvelope(4), 0L);
+        LoginLifeSnapshot first = life.current().orElseThrow();
+        sendBulk(wiring, handler, hello.connectionToken(), limits, 82L, lifeEnvelope(4), 20L);
+
+        assertSame(first, life.current().orElseThrow());
+        assertTrue(wiring.currentOrchestrator(handler).isPresent());
+
+        sendBulk(wiring, handler, hello.connectionToken(), limits, 83L, lifeEnvelope(5), 40L);
+        assertTrue(wiring.currentOrchestrator(handler).isEmpty());
+        assertTrue(settings.current().isEmpty());
+        assertTrue(life.current().isEmpty());
+
+        LoginSyncFrame replacement = readyTypedClient(wiring, handler, "malformed");
+        sendBulk(wiring, handler, replacement.connectionToken(), limits,
+            84L, lifeEnvelope(3), 60L);
+        assertEquals(3, life.current().orElseThrow().lives());
+        sendBulk(wiring, handler, replacement.connectionToken(), limits, 87L,
+            new byte[] {1, 2, 3, 4}, 80L);
+        assertTrue(wiring.currentOrchestrator(handler).isEmpty());
+        assertTrue(settings.current().isEmpty());
+        assertTrue(life.current().isEmpty());
+    }
+
+    @Test
+    void replayOverflowAfterLifePublicationClearsBothStatesAndAssembly() {
+        byte[] envelope = lifeEnvelope(11);
+        FragmentAssemblyLimits sizingLimits = lifeLimits();
+        QuestingFragmentCodec sizingCodec = new QuestingFragmentCodec(sizingLimits);
+        long lifeReplayBytes = new BoundedFragmenter(sizingLimits).split(85L, envelope)
+            .stream().mapToLong(fragment -> sizingCodec.encode(fragment).length).sum();
+        long replayBound = lifeReplayBytes
+            + 7L * (QuestingFragmentCodec.HEADER_BYTES + 1L);
+        FragmentAssemblyLimits limits = lifeLimits(replayBound);
+        ClientQuestSettingsState settings = new ClientQuestSettingsState();
+        ClientLifeState life = new ClientLifeState();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(
+            settings, life, () -> { }, packet -> { }, limits);
+        Object handler = new Object();
+        LoginSyncFrame hello = readyTypedClient(wiring, handler, "overflow-life");
+        sendBulk(wiring, handler, hello.connectionToken(), limits,
+            85L, envelope, 0L);
+        assertEquals(11, life.current().orElseThrow().lives());
+
+        QuestingFragmentCodec codec = new QuestingFragmentCodec(limits);
+        for (int index = 0; index < 7; index++) {
+            wiring.receive(handler, LoginSyncFrame.bulkFragment(
+                hello.connectionToken(), codec.encode(new QuestingFragment(
+                    86L, 8, index, 8, new byte[] {(byte) index}))), 20L + index);
+        }
+        assertEquals(replayBound, wiring.retainedReplayBytes(handler));
+        LoginSyncBulkSyncOrchestrator active = wiring.currentOrchestrator(handler).orElseThrow();
+        assertTrue(active.hasActiveAssemblies());
+        wiring.receive(handler, LoginSyncFrame.bulkFragment(hello.connectionToken(), codec.encode(
+            new QuestingFragment(86L, 8, 7, 8, new byte[] {7}))), 27L);
+
+        assertTrue(wiring.currentOrchestrator(handler).isEmpty());
+        assertEquals(0L, wiring.retainedReplayBytes(handler));
+        assertFalse(active.hasActiveAssemblies());
+        assertTrue(settings.current().isEmpty());
+        assertTrue(life.current().isEmpty());
+    }
+
+    @Test
+    void lifeReconnectStaleTeardownTerminalAndWorldTransitionsFollowTheActiveLease() {
+        ClientQuestSettingsState settings = new ClientQuestSettingsState();
+        ClientLifeState life = new ClientLifeState();
+        FragmentAssemblyLimits limits = lifeLimits();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(
+            settings, life, () -> { }, packet -> { }, limits);
+        Object oldHandler = new Object();
+        LoginSyncFrame oldHello = readyTypedClient(wiring, oldHandler, "old");
+        sendBulk(wiring, oldHandler, oldHello.connectionToken(), limits,
+            91L, lifeEnvelope(2), 0L);
+
+        Object newHandler = new Object();
+        wiring.login(newHandler);
+        assertTrue(life.current().isEmpty());
+        LoginSyncFrame newHello = wiring.outboundHello(newHandler).orElseThrow();
+        LoginSyncSession newServer = server();
+        wiring.receive(newHandler, newServer.receive(newHello).response().orElseThrow());
+        wiring.receive(newHandler, newServer.sendSettings(snapshot("new")));
+        sendBulk(wiring, newHandler, newHello.connectionToken(), limits,
+            92L, lifeEnvelope(Integer.MAX_VALUE), 20L);
+
+        wiring.terminal(oldHandler);
+        sendBulk(wiring, oldHandler, oldHello.connectionToken(), limits,
+            93L, lifeEnvelope(-99), 40L);
+        assertEquals(Integer.MAX_VALUE, life.current().orElseThrow().lives());
+
+        Object oldWorld = new Object();
+        Object currentWorld = new Object();
+        wiring.worldChanged(oldWorld, currentWorld);
+        assertEquals(Integer.MAX_VALUE, life.current().orElseThrow().lives());
+        wiring.worldChanged(oldWorld, null);
+        assertEquals(Integer.MAX_VALUE, life.current().orElseThrow().lives());
+
+        sendBulk(wiring, newHandler, UUID.randomUUID(), limits,
+            94L, lifeEnvelope(8), 60L);
+        assertTrue(settings.current().isEmpty());
+        assertTrue(life.current().isEmpty());
+
+        LoginSyncFrame finalHello = readyTypedClient(wiring, newHandler, "final");
+        sendBulk(wiring, newHandler, finalHello.connectionToken(), limits,
+            95L, lifeEnvelope(6), 80L);
+        assertEquals(6, life.current().orElseThrow().lives());
+        wiring.terminal(newHandler);
+        assertTrue(settings.current().isEmpty());
+        assertTrue(life.current().isEmpty());
+
+        LoginSyncFrame unloadHello = readyTypedClient(wiring, newHandler, "unload");
+        sendBulk(wiring, newHandler, unloadHello.connectionToken(), limits,
+            96L, lifeEnvelope(7), 100L);
+        assertEquals(7, life.current().orElseThrow().lives());
+        wiring.worldChanged(currentWorld, null);
+        wiring.worldChanged(currentWorld, null);
+        wiring.terminal(newHandler);
+        assertTrue(settings.current().isEmpty());
+        assertTrue(life.current().isEmpty());
     }
 
     @Test
@@ -732,6 +915,50 @@ public class LoginSyncClientWiringTest {
 
     private static FragmentAssemblyLimits limits() {
         return limits(1_000L);
+    }
+
+    private static FragmentAssemblyLimits lifeLimits() {
+        return lifeLimits(1_000L);
+    }
+
+    private static FragmentAssemblyLimits lifeLimits(long maxReservedBytes) {
+        return new FragmentAssemblyLimits(7, 64, 10, 2, maxReservedBytes, 8, 10L);
+    }
+
+    private static byte[] lifeEnvelope(int lives) {
+        return LoginBulkPayloadCodec.encode(
+            LoginBulkPayload.life(new LoginLifeSnapshot(lives)));
+    }
+
+    private static LoginSyncFrame readyTypedClient(
+        LoginSyncClientWiring wiring,
+        Object handler,
+        String settingsName
+    ) {
+        wiring.login(handler);
+        LoginSyncFrame hello = wiring.outboundHello(handler).orElseThrow();
+        LoginSyncSession server = server();
+        wiring.receive(handler, server.receive(hello).response().orElseThrow());
+        wiring.receive(handler, server.sendSettings(snapshot(settingsName)));
+        return hello;
+    }
+
+    private static void sendBulk(
+        LoginSyncClientWiring wiring,
+        Object handler,
+        UUID token,
+        FragmentAssemblyLimits limits,
+        long transferId,
+        byte[] payload,
+        long firstNanos
+    ) {
+        QuestingFragmentCodec codec = new QuestingFragmentCodec(limits);
+        List<QuestingFragment> fragments = new BoundedFragmenter(limits).split(
+            transferId, payload);
+        for (int index = 0; index < fragments.size(); index++) {
+            wiring.receive(handler, LoginSyncFrame.bulkFragment(
+                token, codec.encode(fragments.get(index))), firstNanos + index);
+        }
     }
 
     private static FragmentAssemblyLimits limits(long maxReservedBytes) {

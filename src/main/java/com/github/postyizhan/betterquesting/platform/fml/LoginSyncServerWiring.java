@@ -1,7 +1,11 @@
 package com.github.postyizhan.betterquesting.platform.fml;
 
 import com.github.postyizhan.betterquesting.BetterQuestingMod;
+import com.github.postyizhan.betterquesting.api.storage.ILifeDatabase;
 import com.github.postyizhan.betterquesting.network.fragment.FragmentAssemblyLimits;
+import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayload;
+import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayloadCodec;
+import com.github.postyizhan.betterquesting.network.sync.LoginLifeSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncBulkSyncOrchestrator;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncConnectionOwner;
@@ -9,6 +13,8 @@ import com.github.postyizhan.betterquesting.network.sync.LoginSyncFrame;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncProtocol;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncSession;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncTransportPackets;
+import com.github.postyizhan.betterquesting.platform.api.PlayerIdentityResolution;
+import com.github.postyizhan.betterquesting.storage.LifeDatabase;
 import com.github.postyizhan.betterquesting.storage.QuestSettings;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -38,6 +44,11 @@ public final class LoginSyncServerWiring {
         List<byte[]> capture(Object serverOwner, Object handler, Object recipient);
     }
 
+    @FunctionalInterface
+    interface TypedBulkPayloadSource {
+        Optional<LoginBulkPayload> capture(Object serverOwner, Object handler, Object recipient);
+    }
+
     private static final LoginSyncServerWiring PRODUCTION = new LoginSyncServerWiring(
         new LoginSyncConnectionOwner(
             LoginSyncSession.Role.SERVER,
@@ -46,6 +57,7 @@ public final class LoginSyncServerWiring {
         (recipient, packet) -> Network.sendToClient((ServerPlayer) recipient, packet),
         (serverOwner, handler, recipient) -> LoginSettingsSnapshot.capture(QuestSettings.INSTANCE),
         (serverOwner, handler, recipient) -> List.of(),
+        LoginSyncServerWiring::captureProductionLifePayload,
         LoginSyncProtocol.FRAGMENT_LIMITS);
 
     private final Object lifecycleLock = new Object();
@@ -53,6 +65,7 @@ public final class LoginSyncServerWiring {
     private final Sender sender;
     private final SettingsCapture settingsCapture;
     private final BulkPayloadSource bulkPayloadSource;
+    private final TypedBulkPayloadSource typedBulkPayloadSource;
     private final FragmentAssemblyLimits fragmentLimits;
     private final IdentityHashMap<Object, Binding> bindings = new IdentityHashMap<>();
 
@@ -63,6 +76,7 @@ public final class LoginSyncServerWiring {
             (serverOwner, handler, recipient) ->
                 LoginSettingsSnapshot.capture(QuestSettings.INSTANCE),
             (serverOwner, handler, recipient) -> List.of(),
+            (serverOwner, handler, recipient) -> Optional.empty(),
             LoginSyncProtocol.FRAGMENT_LIMITS);
     }
 
@@ -73,10 +87,29 @@ public final class LoginSyncServerWiring {
         BulkPayloadSource bulkPayloadSource,
         FragmentAssemblyLimits fragmentLimits
     ) {
+        this(
+            owner,
+            sender,
+            settingsCapture,
+            bulkPayloadSource,
+            (serverOwner, handler, recipient) -> Optional.empty(),
+            fragmentLimits);
+    }
+
+    LoginSyncServerWiring(
+        LoginSyncConnectionOwner owner,
+        Sender sender,
+        SettingsCapture settingsCapture,
+        BulkPayloadSource bulkPayloadSource,
+        TypedBulkPayloadSource typedBulkPayloadSource,
+        FragmentAssemblyLimits fragmentLimits
+    ) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.sender = Objects.requireNonNull(sender, "sender");
         this.settingsCapture = Objects.requireNonNull(settingsCapture, "settingsCapture");
         this.bulkPayloadSource = Objects.requireNonNull(bulkPayloadSource, "bulkPayloadSource");
+        this.typedBulkPayloadSource = Objects.requireNonNull(
+            typedBulkPayloadSource, "typedBulkPayloadSource");
         this.fragmentLimits = Objects.requireNonNull(fragmentLimits, "fragmentLimits");
         if (owner.role() != LoginSyncSession.Role.SERVER) {
             throw new IllegalArgumentException("server wiring requires a server connection owner");
@@ -225,15 +258,24 @@ public final class LoginSyncServerWiring {
         List<byte[]> payloads = Objects.requireNonNull(
             bulkPayloadSource.capture(serverOwner, handler, recipient),
             "bulkPayloadSource returned null");
-        if (payloads.size() > fragmentLimits.maxTrackedTransferIds()) {
+        Optional<LoginBulkPayload> typedPayload = Objects.requireNonNull(
+            typedBulkPayloadSource.capture(serverOwner, handler, recipient),
+            "typedBulkPayloadSource returned null");
+        int typedPayloadCount = typedPayload.isPresent() ? 1 : 0;
+        if (payloads.size() > fragmentLimits.maxTrackedTransferIds() - typedPayloadCount) {
             throw new IllegalArgumentException("bulk payload source exceeds tracked transfer bound");
         }
+        int payloadCount = payloads.size() + typedPayloadCount;
+
+        List<byte[]> encodedPayloads = new ArrayList<>(payloadCount);
+        encodedPayloads.addAll(payloads);
+        typedPayload.map(LoginBulkPayloadCodec::encode).ifPresent(encodedPayloads::add);
 
         List<LoginSyncFrame> outbound = new ArrayList<>();
         long retainedReplayBytes = 0L;
         outbound.add(serverHello);
         outbound.add(settingsFrame);
-        for (byte[] payload : payloads) {
+        for (byte[] payload : encodedPayloads) {
             if (!isCurrent(handler, expected)) {
                 return List.of();
             }
@@ -262,6 +304,31 @@ public final class LoginSyncServerWiring {
             expected.captureReplay(cached, retainedReplayBytes);
         }
         return cached;
+    }
+
+    static Optional<LoginBulkPayload> captureLifePayload(
+        PlayerIdentityResolution resolution,
+        ILifeDatabase lives
+    ) {
+        Objects.requireNonNull(resolution, "resolution");
+        Objects.requireNonNull(lives, "lives");
+        return resolution.identity().map(identity -> LoginBulkPayload.life(
+            LoginLifeSnapshot.capture(lives, identity.id())));
+    }
+
+    private static Optional<LoginBulkPayload> captureProductionLifePayload(
+        Object serverOwner,
+        Object handler,
+        Object recipient
+    ) {
+        if (!(serverOwner instanceof MinecraftServer server)
+            || !(recipient instanceof EntityPlayer player)) {
+            return Optional.empty();
+        }
+        return ServerIdentityContext.current(server)
+            .map(MitePlayerIdentityAdapter::new)
+            .map(adapter -> adapter.resolve(player))
+            .flatMap(resolution -> captureLifePayload(resolution, LifeDatabase.INSTANCE));
     }
 
     private void sendAll(

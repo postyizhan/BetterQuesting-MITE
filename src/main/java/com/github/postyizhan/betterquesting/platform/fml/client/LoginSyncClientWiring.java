@@ -1,9 +1,12 @@
 package com.github.postyizhan.betterquesting.platform.fml.client;
 
 import com.github.postyizhan.betterquesting.BetterQuestingMod;
+import com.github.postyizhan.betterquesting.client.state.ClientLifeState;
 import com.github.postyizhan.betterquesting.client.state.ClientQuestSettingsState;
 import com.github.postyizhan.betterquesting.network.fragment.FragmentAssemblyLimits;
 import com.github.postyizhan.betterquesting.network.fragment.QuestingFragment;
+import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayload;
+import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayloadCodec;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncBulkSyncOrchestrator;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncConnectionOwner;
@@ -38,6 +41,7 @@ public final class LoginSyncClientWiring {
 
     private static final LoginSyncClientWiring PRODUCTION = new LoginSyncClientWiring(
         ClientQuestSettingsState.INSTANCE,
+        ClientLifeState.INSTANCE,
         () -> LoginSyncTransportPackets.registerClient(LoginSyncClientWiring::receiveFromRic),
         Network::sendToServer);
 
@@ -62,7 +66,9 @@ public final class LoginSyncClientWiring {
     private final Sender sender;
     private final FragmentAssemblyLimits fragmentLimits;
     private final LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication;
+    private final ClientLifeState lifeState;
     private final IdentityHashMap<Object, Binding> bindings = new IdentityHashMap<>();
+    private Object currentWorld;
     private boolean readerRegistered;
     private boolean readerRegistrationInProgress;
 
@@ -71,12 +77,33 @@ public final class LoginSyncClientWiring {
         Runnable readerRegistration,
         Sender sender
     ) {
+        this(settingsState, new ClientLifeState(), readerRegistration, sender);
+    }
+
+    LoginSyncClientWiring(
+        ClientQuestSettingsState settingsState,
+        ClientLifeState lifeState,
+        Runnable readerRegistration,
+        Sender sender
+    ) {
+        this(settingsState, lifeState, readerRegistration, sender,
+            LoginSyncProtocol.FRAGMENT_LIMITS);
+    }
+
+    LoginSyncClientWiring(
+        ClientQuestSettingsState settingsState,
+        ClientLifeState lifeState,
+        Runnable readerRegistration,
+        Sender sender,
+        FragmentAssemblyLimits fragmentLimits
+    ) {
         this(
             settingsOwner(settingsState),
             readerRegistration,
             sender,
-            LoginSyncProtocol.FRAGMENT_LIMITS,
-            ignored -> { });
+            fragmentLimits,
+            null,
+            Objects.requireNonNull(lifeState, "lifeState"));
     }
 
     LoginSyncClientWiring(
@@ -89,7 +116,8 @@ public final class LoginSyncClientWiring {
             readerRegistration,
             sender,
             LoginSyncProtocol.FRAGMENT_LIMITS,
-            ignored -> { });
+            ignored -> { },
+            null);
     }
 
     LoginSyncClientWiring(
@@ -99,12 +127,27 @@ public final class LoginSyncClientWiring {
         FragmentAssemblyLimits fragmentLimits,
         LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication
     ) {
+        this(owner, readerRegistration, sender, fragmentLimits, bulkPublication, null);
+    }
+
+    private LoginSyncClientWiring(
+        LoginSyncConnectionOwner owner,
+        Runnable readerRegistration,
+        Sender sender,
+        FragmentAssemblyLimits fragmentLimits,
+        LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication,
+        ClientLifeState lifeState
+    ) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.readerRegistration = Objects.requireNonNull(
             readerRegistration, "readerRegistration");
         this.sender = Objects.requireNonNull(sender, "sender");
         this.fragmentLimits = Objects.requireNonNull(fragmentLimits, "fragmentLimits");
-        this.bulkPublication = Objects.requireNonNull(bulkPublication, "bulkPublication");
+        if (bulkPublication == null && lifeState == null) {
+            throw new NullPointerException("bulkPublication");
+        }
+        this.bulkPublication = bulkPublication;
+        this.lifeState = lifeState;
         if (owner.role() != LoginSyncSession.Role.CLIENT) {
             throw new IllegalArgumentException("client wiring requires a client connection owner");
         }
@@ -176,8 +219,14 @@ public final class LoginSyncClientWiring {
         LoginSyncSession session = null;
         try {
             session = owner.bind(handler);
+            LoginSyncBulkSyncOrchestrator.PayloadPublication publication = bulkPublication;
+            if (lifeState != null) {
+                ClientLifeState.ConnectionLease lifeLease = lifeState.openConnectionLease();
+                session.addCloseHook(lifeLease::close);
+                publication = payload -> publishLife(lifeLease, payload);
+            }
             LoginSyncBulkSyncOrchestrator orchestrator = new LoginSyncBulkSyncOrchestrator(
-                session, fragmentLimits, bulkPublication);
+                session, fragmentLimits, publication);
             LoginSyncFrame helloFrame = orchestrator.startClientHello();
             Packet helloPacket = LoginSyncTransportPackets.c2s(helloFrame);
             if (LoginSyncTransportPackets.isRejected(helloPacket)) {
@@ -200,6 +249,15 @@ public final class LoginSyncClientWiring {
             unbindExpected(handler, session);
             logFailure("start a client login-sync connection", failure);
         }
+    }
+
+    private static void publishLife(
+        ClientLifeState.ConnectionLease lease,
+        byte[] encoded
+    ) {
+        LoginBulkPayload payload = LoginBulkPayloadCodec.decode(encoded).orElseThrow(
+            () -> new IllegalArgumentException("invalid typed login bulk payload"));
+        lease.publish(payload.life());
     }
 
     void receive(Object handler, LoginSyncFrame frame) {
@@ -310,8 +368,26 @@ public final class LoginSyncClientWiring {
     }
 
     void worldUnload() {
+        unloadWorld(null, false);
+    }
+
+    void worldChanged(Object worldBefore, Object worldAfter) {
+        if (worldAfter != null) {
+            synchronized (lifecycleLock) {
+                currentWorld = worldAfter;
+            }
+        } else if (worldBefore != null) {
+            unloadWorld(worldBefore, true);
+        }
+    }
+
+    private void unloadWorld(Object expectedWorld, boolean requireExpectedWorld) {
         List<HandlerBinding> removed = new ArrayList<>();
         synchronized (lifecycleLock) {
+            if (requireExpectedWorld && currentWorld != null && currentWorld != expectedWorld) {
+                return;
+            }
+            currentWorld = null;
             for (var entry : bindings.entrySet()) {
                 removed.add(new HandlerBinding(entry.getKey(), entry.getValue()));
             }
@@ -320,12 +396,6 @@ public final class LoginSyncClientWiring {
         for (HandlerBinding candidate : removed) {
             candidate.binding.releaseReplay();
             unbindOwnerExpected(candidate.handler, candidate.binding.session);
-        }
-    }
-
-    void worldChanged(Object worldBefore, Object worldAfter) {
-        if (worldBefore != null && worldAfter == null) {
-            worldUnload();
         }
     }
 
