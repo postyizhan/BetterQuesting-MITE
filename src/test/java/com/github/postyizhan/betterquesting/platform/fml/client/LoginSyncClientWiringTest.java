@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.postyizhan.betterquesting.client.state.ClientLifeState;
+import com.github.postyizhan.betterquesting.client.state.ClientPlayerNameState;
 import com.github.postyizhan.betterquesting.client.state.ClientQuestSettingsState;
 import com.github.postyizhan.betterquesting.network.fragment.BoundedFragmenter;
 import com.github.postyizhan.betterquesting.network.fragment.FragmentAssemblyLimits;
@@ -19,6 +20,7 @@ import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
 import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayload;
 import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayloadCodec;
 import com.github.postyizhan.betterquesting.network.sync.LoginLifeSnapshot;
+import com.github.postyizhan.betterquesting.network.sync.LoginNameSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncBulkSyncOrchestrator;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncConnectionOwner;
@@ -139,6 +141,80 @@ public class LoginSyncClientWiringTest {
             wiring.worldUnload();
             LifeDatabase.INSTANCE.reset();
         }
+    }
+
+    @Test
+    void typedNamePublishesOnlyAfterCompleteValidationAndAllCleanupPathsClearItsLease() {
+        ClientQuestSettingsState settings = new ClientQuestSettingsState();
+        ClientLifeState life = new ClientLifeState();
+        ClientPlayerNameState names = new ClientPlayerNameState();
+        FragmentAssemblyLimits limits = nameLimits();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(
+            settings, life, names, () -> { }, packet -> { }, limits);
+        Object handler = new Object();
+        LoginSyncFrame hello = readyTypedClient(wiring, handler, "typed-name");
+        LoginNameSnapshot expected = new LoginNameSnapshot(AUTHORITATIVE_ID, "Alice");
+        List<QuestingFragment> fragments = new BoundedFragmenter(limits).split(
+            75L, nameEnvelope(expected));
+        QuestingFragmentCodec codec = new QuestingFragmentCodec(limits);
+
+        long nowNanos = 0L;
+        for (int index = fragments.size() - 1; index > 0; index--) {
+            wiring.receive(handler, LoginSyncFrame.bulkFragment(
+                hello.connectionToken(), codec.encode(fragments.get(index))), nowNanos++);
+            assertTrue(names.current().isEmpty());
+        }
+        wiring.receive(handler, LoginSyncFrame.bulkFragment(
+            hello.connectionToken(), codec.encode(fragments.get(0))), nowNanos);
+
+        assertEquals(expected, names.current().orElseThrow());
+        wiring.terminal(handler);
+        assertTrue(names.current().isEmpty());
+
+        LoginSyncFrame unloadHello = readyTypedClient(wiring, handler, "name-unload");
+        sendBulk(wiring, handler, unloadHello.connectionToken(), limits,
+            76L, nameEnvelope(expected), 20L);
+        assertEquals(expected, names.current().orElseThrow());
+        wiring.worldUnload();
+        assertTrue(names.current().isEmpty());
+    }
+
+    @Test
+    void nameDuplicatesAreIdempotentWhileConflictAndDelayedOldFragmentsFailClosed() {
+        ClientQuestSettingsState settings = new ClientQuestSettingsState();
+        ClientLifeState life = new ClientLifeState();
+        ClientPlayerNameState names = new ClientPlayerNameState();
+        FragmentAssemblyLimits limits = nameLimits();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(
+            settings, life, names, () -> { }, packet -> { }, limits);
+        Object oldHandler = new Object();
+        LoginSyncFrame oldHello = readyTypedClient(wiring, oldHandler, "old-name");
+        LoginNameSnapshot first = new LoginNameSnapshot(AUTHORITATIVE_ID, "Alice");
+        sendBulk(wiring, oldHandler, oldHello.connectionToken(), limits,
+            77L, nameEnvelope(first), 0L);
+        LoginNameSnapshot firstPublished = names.current().orElseThrow();
+        sendBulk(wiring, oldHandler, oldHello.connectionToken(), limits,
+            78L, nameEnvelope(first), 20L);
+        assertSame(firstPublished, names.current().orElseThrow());
+
+        Object replacementHandler = new Object();
+        LoginSyncFrame replacementHello = readyTypedClient(
+            wiring, replacementHandler, "replacement-name");
+        assertTrue(names.current().isEmpty());
+        LoginNameSnapshot replacement = new LoginNameSnapshot(AUTHORITATIVE_ID, "ALICE");
+        sendBulk(wiring, replacementHandler, replacementHello.connectionToken(), limits,
+            79L, nameEnvelope(replacement), 40L);
+        sendBulk(wiring, oldHandler, oldHello.connectionToken(), limits,
+            80L, nameEnvelope(new LoginNameSnapshot(AUTHORITATIVE_ID, "Delayed")), 60L);
+        wiring.terminal(oldHandler);
+        assertEquals(replacement, names.current().orElseThrow());
+
+        sendBulk(wiring, replacementHandler, replacementHello.connectionToken(), limits,
+            81L, nameEnvelope(new LoginNameSnapshot(AUTHORITATIVE_ID, "Conflict")), 80L);
+        assertTrue(wiring.currentOrchestrator(replacementHandler).isEmpty());
+        assertTrue(settings.current().isEmpty());
+        assertTrue(life.current().isEmpty());
+        assertTrue(names.current().isEmpty());
     }
 
     @Test
@@ -691,12 +767,16 @@ public class LoginSyncClientWiringTest {
     @Test
     void oneTransientPublicationFailureRetriesAndPersistentFailureCloses() {
         AtomicInteger attempts = new AtomicInteger();
+        AtomicReference<byte[]> immutablePayload = new AtomicReference<>();
         LoginSyncConnectionOwner owner = owner(new AtomicInteger());
         LoginSyncClientWiring wiring = new LoginSyncClientWiring(
             owner, () -> { }, packet -> { }, limits(), payload -> {
                 if (attempts.incrementAndGet() == 1) {
+                    immutablePayload.set(payload.clone());
+                    payload[0] ^= 1;
                     throw new IllegalStateException("transient");
                 }
+                assertArrayEquals(immutablePayload.get(), payload);
             });
         Object handler = new Object();
         wiring.login(handler);
@@ -925,9 +1005,17 @@ public class LoginSyncClientWiringTest {
         return new FragmentAssemblyLimits(7, 64, 10, 2, maxReservedBytes, 8, 10L);
     }
 
+    private static FragmentAssemblyLimits nameLimits() {
+        return new FragmentAssemblyLimits(7, 128, 20, 2, 4_096L, 8, 10L);
+    }
+
     private static byte[] lifeEnvelope(int lives) {
         return LoginBulkPayloadCodec.encode(
             LoginBulkPayload.life(new LoginLifeSnapshot(lives)));
+    }
+
+    private static byte[] nameEnvelope(LoginNameSnapshot snapshot) {
+        return LoginBulkPayloadCodec.encode(LoginBulkPayload.name(snapshot));
     }
 
     private static LoginSyncFrame readyTypedClient(

@@ -4,7 +4,10 @@ import com.github.postyizhan.betterquesting.BetterQuestingMod;
 import com.github.postyizhan.betterquesting.core.BetterQuestingConstants;
 import com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore;
 import com.github.postyizhan.betterquesting.network.probe.ProbePackets;
+import com.github.postyizhan.betterquesting.network.sync.LoginNameSnapshot;
 import com.github.postyizhan.betterquesting.platform.api.DirtyPlayerSink;
+import com.github.postyizhan.betterquesting.platform.api.PlayerIdentityResolution;
+import com.github.postyizhan.betterquesting.platform.api.PlayerIdentityService;
 import com.github.postyizhan.betterquesting.questing.QuestDatabase;
 import com.github.postyizhan.betterquesting.questing.QuestLineDatabase;
 import com.github.postyizhan.betterquesting.questing.party.PartyManager;
@@ -15,12 +18,15 @@ import com.github.postyizhan.betterquesting.storage.QuestProgressPersistence;
 import com.github.postyizhan.betterquesting.storage.QuestSettings;
 import com.github.postyizhan.betterquesting.storage.migration.MigrationReport;
 import java.io.IOException;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 import moddedmite.rustedironcore.api.event.Handlers;
 import moddedmite.rustedironcore.api.event.events.PlayerLoggedInEvent;
 import moddedmite.rustedironcore.api.event.events.PlayerLoggedOutEvent;
 import moddedmite.rustedironcore.api.event.listener.IInitializationListener;
 import moddedmite.rustedironcore.api.event.listener.IPlayerEventListener;
+import net.minecraft.NetServerHandler;
 import net.minecraft.ServerPlayer;
 import net.minecraft.server.MinecraftServer;
 import net.xiaoyu233.fml.FishModLoader;
@@ -97,6 +103,63 @@ public final class CommonBootstrap {
                 "Skipped BetterQuesting NameCache update for unresolved player username '{}'",
                 reportedName);
         }
+    }
+
+    static Optional<LoginNameSnapshot> captureLoginNameSnapshot(
+        Object serverOwner,
+        Object handler,
+        Object recipient
+    ) {
+        if (!(serverOwner instanceof MinecraftServer server)
+            || !(handler instanceof NetServerHandler netHandler)
+            || !(recipient instanceof ServerPlayer player)
+            || netHandler.playerEntity != player) {
+            return Optional.empty();
+        }
+        PlayerIdentityService identities = ServerIdentityContext.current(server).orElse(null);
+        PlayerIdentityResolution resolution = identities == null
+            ? null : new MitePlayerIdentityAdapter(identities).resolve(player);
+        PlayerIdentityService currentIdentities = ServerIdentityContext.current(server).orElse(null);
+        return captureLoginNameSnapshot(
+            server,
+            handler,
+            player.mcServer,
+            player.playerNetServerHandler,
+            nameCacheServer,
+            nameCacheLifecycle != null && nameCacheLifecycle.isWritable(),
+            identities,
+            currentIdentities,
+            resolution,
+            player.getEntityName(),
+            NameCache.INSTANCE);
+    }
+
+    static Optional<LoginNameSnapshot> captureLoginNameSnapshot(
+        Object serverOwner,
+        Object handler,
+        Object playerServer,
+        Object playerHandler,
+        Object cacheServer,
+        boolean cacheWritable,
+        PlayerIdentityService resolvingIdentities,
+        PlayerIdentityService currentIdentities,
+        PlayerIdentityResolution resolution,
+        String reportedName,
+        NameCache names
+    ) {
+        if (serverOwner == null || handler == null
+            || playerServer != serverOwner || playerHandler != handler
+            || cacheServer != serverOwner || !cacheWritable
+            || resolvingIdentities == null || currentIdentities != resolvingIdentities
+            || resolution == null || !resolution.resolved()
+            || reportedName == null || names == null) {
+            return Optional.empty();
+        }
+        var identity = resolution.identity().orElseThrow();
+        if (!identity.normalizedUsername().equals(reportedName.toLowerCase(Locale.ROOT))) {
+            return Optional.empty();
+        }
+        return LoginNameSnapshot.capture(names, identity.id(), reportedName);
     }
 
     private static void loadQuestLoot(MinecraftServer server) {

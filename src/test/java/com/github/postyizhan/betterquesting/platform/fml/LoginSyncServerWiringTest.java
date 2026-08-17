@@ -15,6 +15,7 @@ import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
 import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayload;
 import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayloadCodec;
 import com.github.postyizhan.betterquesting.network.sync.LoginLifeSnapshot;
+import com.github.postyizhan.betterquesting.network.sync.LoginNameSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncBulkSyncOrchestrator;
 import com.github.postyizhan.betterquesting.network.sync.LoginSyncConnectionOwner;
@@ -44,7 +45,7 @@ class LoginSyncServerWiringTest {
     @Test
     void protocolVersionOneClaimsNoFeatures() {
         assertEquals(1, LoginSyncProtocol.CAPABILITIES.protocolVersion());
-        assertEquals(2, LoginSyncProtocol.CAPABILITIES.dataFormatVersion());
+        assertEquals(3, LoginSyncProtocol.CAPABILITIES.dataFormatVersion());
         assertEquals(0L, LoginSyncProtocol.CAPABILITIES.supportedFeatureBits());
         assertEquals(0L, LoginSyncProtocol.CAPABILITIES.requiredFeatureBits());
         assertEquals(0L, LoginSyncProtocol.LIMITS.knownFeatureBits());
@@ -90,6 +91,80 @@ class LoginSyncServerWiringTest {
     }
 
     @Test
+    void authoritativeNamePayloadUsesTheTypedPipelineAndIsAlwaysSentLast() {
+        LoginSyncConnectionOwner owner = owner(LoginSyncSession.Role.SERVER);
+        List<LoginSyncFrame> sent = new ArrayList<>();
+        LoginNameSnapshot name = new LoginNameSnapshot(PLAYER_ID, "Alice");
+        LoginSyncServerWiring wiring = new LoginSyncServerWiring(
+            owner,
+            (recipient, packet) -> sent.add(LoginSyncTransportPackets.extract(packet).orElseThrow()),
+            (server, handler, recipient) -> snapshot("name-last"),
+            (server, handler, recipient) -> List.of(),
+            (server, handler, recipient) -> Optional.of(
+                LoginBulkPayload.life(new LoginLifeSnapshot(7))),
+            (server, handler, recipient) -> Optional.of(LoginBulkPayload.name(name)),
+            LoginSyncProtocol.FRAGMENT_LIMITS);
+        Object server = new Object();
+        Object handler = new Object();
+
+        wiring.bind(server, handler);
+        wiring.receive(server, handler, new Object(), LoginSyncFrame.clientHello(
+            new HandshakeHello(TOKEN, LoginSyncProtocol.CAPABILITIES)));
+
+        assertEquals(4, sent.size());
+        LoginBulkPayload firstTyped = decodeSingleFragment(sent.get(2));
+        LoginBulkPayload lastTyped = decodeSingleFragment(sent.get(3));
+        assertEquals(new LoginLifeSnapshot(7), firstTyped.life());
+        assertEquals(name, lastTyped.name());
+        assertEquals("betterquesting:login_name", lastTyped.id());
+    }
+
+    @Test
+    void missingOrFailingRequiredNameCaptureSendsNoFramesAndClosesTheBinding() {
+        Object server = new Object();
+        Object handler = new Object();
+        LoginSyncFrame hello = LoginSyncFrame.clientHello(
+            new HandshakeHello(TOKEN, LoginSyncProtocol.CAPABILITIES));
+
+        LoginSyncConnectionOwner missingOwner = owner(LoginSyncSession.Role.SERVER);
+        List<LoginSyncFrame> missingSent = new ArrayList<>();
+        LoginSyncServerWiring missing = new LoginSyncServerWiring(
+            missingOwner,
+            (recipient, packet) -> missingSent.add(
+                LoginSyncTransportPackets.extract(packet).orElseThrow()),
+            (serverOwner, boundHandler, recipient) -> snapshot("missing-name"),
+            (serverOwner, boundHandler, recipient) -> List.of(),
+            (serverOwner, boundHandler, recipient) -> Optional.of(
+                LoginBulkPayload.life(new LoginLifeSnapshot(3))),
+            (serverOwner, boundHandler, recipient) -> Optional.empty(),
+            LoginSyncProtocol.FRAGMENT_LIMITS);
+        missing.bind(server, handler);
+        missing.receive(server, handler, new Object(), hello);
+
+        assertTrue(missingSent.isEmpty());
+        assertTrue(missingOwner.current(server, handler).isEmpty());
+
+        LoginSyncConnectionOwner failingOwner = owner(LoginSyncSession.Role.SERVER);
+        List<LoginSyncFrame> failingSent = new ArrayList<>();
+        LoginSyncServerWiring failing = new LoginSyncServerWiring(
+            failingOwner,
+            (recipient, packet) -> failingSent.add(
+                LoginSyncTransportPackets.extract(packet).orElseThrow()),
+            (serverOwner, boundHandler, recipient) -> snapshot("failing-name"),
+            (serverOwner, boundHandler, recipient) -> List.of(new byte[] {1}),
+            (serverOwner, boundHandler, recipient) -> Optional.empty(),
+            (serverOwner, boundHandler, recipient) -> {
+                throw new IllegalArgumentException("name capture failed");
+            },
+            LoginSyncProtocol.FRAGMENT_LIMITS);
+        failing.bind(server, handler);
+        failing.receive(server, handler, new Object(), hello);
+
+        assertTrue(failingSent.isEmpty());
+        assertTrue(failingOwner.current(server, handler).isEmpty());
+    }
+
+    @Test
     void unresolvedIdentityOmitsOnlyLifeWhileSettingsStillComplete() {
         LoginSyncConnectionOwner owner = owner(LoginSyncSession.Role.SERVER);
         List<LoginSyncFrame> sent = new ArrayList<>();
@@ -114,7 +189,7 @@ class LoginSyncServerWiringTest {
     }
 
     @Test
-    void preLifeDataFormatPeerCannotNegotiate() {
+    void preNameDataFormatPeerCannotNegotiate() {
         LoginSyncConnectionOwner owner = owner(LoginSyncSession.Role.SERVER);
         LoginSyncServerWiring wiring = new LoginSyncServerWiring(owner, (recipient, packet) -> { });
         Object server = new Object();
@@ -122,7 +197,7 @@ class LoginSyncServerWiringTest {
         wiring.bind(server, handler);
 
         wiring.receive(server, handler, new Object(), LoginSyncFrame.clientHello(
-            new HandshakeHello(TOKEN, new HandshakeCapabilities(1, 1, 0L, 0L))));
+            new HandshakeHello(TOKEN, new HandshakeCapabilities(1, 2, 0L, 0L))));
 
         assertTrue(owner.current(server, handler).isEmpty());
     }
@@ -595,6 +670,13 @@ class LoginSyncServerWiringTest {
         return new LoginSettingsSnapshot(
             name, 1, true, false, false, 3, 10,
             "betterquesting:textures/gui/default_title.png", 0.5F, 0F, -128, 0);
+    }
+
+    private static LoginBulkPayload decodeSingleFragment(LoginSyncFrame frame) {
+        byte[] fragmentBytes = frame.bulkFragment().orElseThrow();
+        byte[] envelopeBytes = LoginSyncProtocol.FRAGMENT_CODEC.decode(fragmentBytes)
+            .orElseThrow().bytes();
+        return LoginBulkPayloadCodec.decode(envelopeBytes).orElseThrow();
     }
 
     private static ILifeDatabase livesReturning(int value) {

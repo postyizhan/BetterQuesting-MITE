@@ -58,6 +58,8 @@ public final class LoginSyncServerWiring {
         (serverOwner, handler, recipient) -> LoginSettingsSnapshot.capture(QuestSettings.INSTANCE),
         (serverOwner, handler, recipient) -> List.of(),
         LoginSyncServerWiring::captureProductionLifePayload,
+        (serverOwner, handler, recipient) -> CommonBootstrap.captureLoginNameSnapshot(
+            serverOwner, handler, recipient).map(LoginBulkPayload::name),
         LoginSyncProtocol.FRAGMENT_LIMITS);
 
     private final Object lifecycleLock = new Object();
@@ -66,6 +68,7 @@ public final class LoginSyncServerWiring {
     private final SettingsCapture settingsCapture;
     private final BulkPayloadSource bulkPayloadSource;
     private final TypedBulkPayloadSource typedBulkPayloadSource;
+    private final TypedBulkPayloadSource requiredNamePayloadSource;
     private final FragmentAssemblyLimits fragmentLimits;
     private final IdentityHashMap<Object, Binding> bindings = new IdentityHashMap<>();
 
@@ -77,6 +80,7 @@ public final class LoginSyncServerWiring {
                 LoginSettingsSnapshot.capture(QuestSettings.INSTANCE),
             (serverOwner, handler, recipient) -> List.of(),
             (serverOwner, handler, recipient) -> Optional.empty(),
+            null,
             LoginSyncProtocol.FRAGMENT_LIMITS);
     }
 
@@ -93,6 +97,7 @@ public final class LoginSyncServerWiring {
             settingsCapture,
             bulkPayloadSource,
             (serverOwner, handler, recipient) -> Optional.empty(),
+            null,
             fragmentLimits);
     }
 
@@ -104,12 +109,32 @@ public final class LoginSyncServerWiring {
         TypedBulkPayloadSource typedBulkPayloadSource,
         FragmentAssemblyLimits fragmentLimits
     ) {
+        this(
+            owner,
+            sender,
+            settingsCapture,
+            bulkPayloadSource,
+            typedBulkPayloadSource,
+            null,
+            fragmentLimits);
+    }
+
+    LoginSyncServerWiring(
+        LoginSyncConnectionOwner owner,
+        Sender sender,
+        SettingsCapture settingsCapture,
+        BulkPayloadSource bulkPayloadSource,
+        TypedBulkPayloadSource typedBulkPayloadSource,
+        TypedBulkPayloadSource requiredNamePayloadSource,
+        FragmentAssemblyLimits fragmentLimits
+    ) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.sender = Objects.requireNonNull(sender, "sender");
         this.settingsCapture = Objects.requireNonNull(settingsCapture, "settingsCapture");
         this.bulkPayloadSource = Objects.requireNonNull(bulkPayloadSource, "bulkPayloadSource");
         this.typedBulkPayloadSource = Objects.requireNonNull(
             typedBulkPayloadSource, "typedBulkPayloadSource");
+        this.requiredNamePayloadSource = requiredNamePayloadSource;
         this.fragmentLimits = Objects.requireNonNull(fragmentLimits, "fragmentLimits");
         if (owner.role() != LoginSyncSession.Role.SERVER) {
             throw new IllegalArgumentException("server wiring requires a server connection owner");
@@ -261,7 +286,21 @@ public final class LoginSyncServerWiring {
         Optional<LoginBulkPayload> typedPayload = Objects.requireNonNull(
             typedBulkPayloadSource.capture(serverOwner, handler, recipient),
             "typedBulkPayloadSource returned null");
-        int typedPayloadCount = typedPayload.isPresent() ? 1 : 0;
+        if (typedPayload.isPresent() && typedPayload.orElseThrow().name() != null) {
+            throw new IllegalArgumentException("the required login name payload must be sent last");
+        }
+        Optional<LoginBulkPayload> requiredNamePayload = Optional.empty();
+        if (requiredNamePayloadSource != null) {
+            requiredNamePayload = Objects.requireNonNull(
+                requiredNamePayloadSource.capture(serverOwner, handler, recipient),
+                "requiredNamePayloadSource returned null");
+            if (requiredNamePayload.isEmpty()
+                || requiredNamePayload.orElseThrow().name() == null) {
+                throw new IllegalStateException("required login name payload is unavailable");
+            }
+        }
+        int typedPayloadCount = (typedPayload.isPresent() ? 1 : 0)
+            + (requiredNamePayload.isPresent() ? 1 : 0);
         if (payloads.size() > fragmentLimits.maxTrackedTransferIds() - typedPayloadCount) {
             throw new IllegalArgumentException("bulk payload source exceeds tracked transfer bound");
         }
@@ -270,6 +309,7 @@ public final class LoginSyncServerWiring {
         List<byte[]> encodedPayloads = new ArrayList<>(payloadCount);
         encodedPayloads.addAll(payloads);
         typedPayload.map(LoginBulkPayloadCodec::encode).ifPresent(encodedPayloads::add);
+        requiredNamePayload.map(LoginBulkPayloadCodec::encode).ifPresent(encodedPayloads::add);
 
         List<LoginSyncFrame> outbound = new ArrayList<>();
         long retainedReplayBytes = 0L;

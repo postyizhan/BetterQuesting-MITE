@@ -2,6 +2,7 @@ package com.github.postyizhan.betterquesting.platform.fml.client;
 
 import com.github.postyizhan.betterquesting.BetterQuestingMod;
 import com.github.postyizhan.betterquesting.client.state.ClientLifeState;
+import com.github.postyizhan.betterquesting.client.state.ClientPlayerNameState;
 import com.github.postyizhan.betterquesting.client.state.ClientQuestSettingsState;
 import com.github.postyizhan.betterquesting.network.fragment.FragmentAssemblyLimits;
 import com.github.postyizhan.betterquesting.network.fragment.QuestingFragment;
@@ -42,8 +43,10 @@ public final class LoginSyncClientWiring {
     private static final LoginSyncClientWiring PRODUCTION = new LoginSyncClientWiring(
         ClientQuestSettingsState.INSTANCE,
         ClientLifeState.INSTANCE,
+        ClientPlayerNameState.INSTANCE,
         () -> LoginSyncTransportPackets.registerClient(LoginSyncClientWiring::receiveFromRic),
-        Network::sendToServer);
+        Network::sendToServer,
+        LoginSyncProtocol.FRAGMENT_LIMITS);
 
     static {
         TickHandler.getInstance().registerClientTickHandler(
@@ -67,6 +70,7 @@ public final class LoginSyncClientWiring {
     private final FragmentAssemblyLimits fragmentLimits;
     private final LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication;
     private final ClientLifeState lifeState;
+    private final ClientPlayerNameState nameState;
     private final IdentityHashMap<Object, Binding> bindings = new IdentityHashMap<>();
     private Object currentWorld;
     private boolean readerRegistered;
@@ -86,7 +90,7 @@ public final class LoginSyncClientWiring {
         Runnable readerRegistration,
         Sender sender
     ) {
-        this(settingsState, lifeState, readerRegistration, sender,
+        this(settingsState, lifeState, new ClientPlayerNameState(), readerRegistration, sender,
             LoginSyncProtocol.FRAGMENT_LIMITS);
     }
 
@@ -97,13 +101,26 @@ public final class LoginSyncClientWiring {
         Sender sender,
         FragmentAssemblyLimits fragmentLimits
     ) {
+        this(settingsState, lifeState, new ClientPlayerNameState(), readerRegistration, sender,
+            fragmentLimits);
+    }
+
+    LoginSyncClientWiring(
+        ClientQuestSettingsState settingsState,
+        ClientLifeState lifeState,
+        ClientPlayerNameState nameState,
+        Runnable readerRegistration,
+        Sender sender,
+        FragmentAssemblyLimits fragmentLimits
+    ) {
         this(
             settingsOwner(settingsState),
             readerRegistration,
             sender,
             fragmentLimits,
             null,
-            Objects.requireNonNull(lifeState, "lifeState"));
+            Objects.requireNonNull(lifeState, "lifeState"),
+            Objects.requireNonNull(nameState, "nameState"));
     }
 
     LoginSyncClientWiring(
@@ -117,6 +134,7 @@ public final class LoginSyncClientWiring {
             sender,
             LoginSyncProtocol.FRAGMENT_LIMITS,
             ignored -> { },
+            null,
             null);
     }
 
@@ -127,7 +145,7 @@ public final class LoginSyncClientWiring {
         FragmentAssemblyLimits fragmentLimits,
         LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication
     ) {
-        this(owner, readerRegistration, sender, fragmentLimits, bulkPublication, null);
+        this(owner, readerRegistration, sender, fragmentLimits, bulkPublication, null, null);
     }
 
     private LoginSyncClientWiring(
@@ -136,7 +154,8 @@ public final class LoginSyncClientWiring {
         Sender sender,
         FragmentAssemblyLimits fragmentLimits,
         LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication,
-        ClientLifeState lifeState
+        ClientLifeState lifeState,
+        ClientPlayerNameState nameState
     ) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.readerRegistration = Objects.requireNonNull(
@@ -148,6 +167,7 @@ public final class LoginSyncClientWiring {
         }
         this.bulkPublication = bulkPublication;
         this.lifeState = lifeState;
+        this.nameState = nameState;
         if (owner.role() != LoginSyncSession.Role.CLIENT) {
             throw new IllegalArgumentException("client wiring requires a client connection owner");
         }
@@ -222,8 +242,10 @@ public final class LoginSyncClientWiring {
             LoginSyncBulkSyncOrchestrator.PayloadPublication publication = bulkPublication;
             if (lifeState != null) {
                 ClientLifeState.ConnectionLease lifeLease = lifeState.openConnectionLease();
+                ClientPlayerNameState.ConnectionLease nameLease = nameState.openConnectionLease();
                 session.addCloseHook(lifeLease::close);
-                publication = payload -> publishLife(lifeLease, payload);
+                session.addCloseHook(nameLease::close);
+                publication = payload -> publishTyped(lifeLease, nameLease, payload);
             }
             LoginSyncBulkSyncOrchestrator orchestrator = new LoginSyncBulkSyncOrchestrator(
                 session, fragmentLimits, publication);
@@ -251,13 +273,18 @@ public final class LoginSyncClientWiring {
         }
     }
 
-    private static void publishLife(
-        ClientLifeState.ConnectionLease lease,
+    private static void publishTyped(
+        ClientLifeState.ConnectionLease lifeLease,
+        ClientPlayerNameState.ConnectionLease nameLease,
         byte[] encoded
     ) {
         LoginBulkPayload payload = LoginBulkPayloadCodec.decode(encoded).orElseThrow(
             () -> new IllegalArgumentException("invalid typed login bulk payload"));
-        lease.publish(payload.life());
+        if (payload.life() != null) {
+            lifeLease.publish(payload.life());
+        } else {
+            nameLease.publish(payload.name());
+        }
     }
 
     void receive(Object handler, LoginSyncFrame frame) {

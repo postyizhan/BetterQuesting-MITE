@@ -7,9 +7,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 class LoginBulkPayloadCodecTest {
+    private static final UUID PLAYER_ID =
+        UUID.fromString("12345678-1234-5678-9abc-def012345678");
     private static final int ID_OFFSET = Integer.BYTES + 2;
     private static final int PAYLOAD_VERSION_OFFSET = ID_OFFSET + 24;
     private static final int BODY_LENGTH_OFFSET = PAYLOAD_VERSION_OFFSET + 1;
@@ -28,6 +31,43 @@ class LoginBulkPayloadCodecTest {
                 + "42514c5301ffffffef",
             HexFormat.of().formatHex(encoded));
         assertEquals(payload, LoginBulkPayloadCodec.decode(encoded).orElseThrow());
+    }
+
+    @Test
+    void roundTripsTheClosedNameVariantThroughTheCanonicalTypedEnvelope() {
+        LoginBulkPayload payload = LoginBulkPayload.name(
+            new LoginNameSnapshot(PLAYER_ID, "Alice"));
+
+        byte[] encoded = LoginBulkPayloadCodec.encode(payload);
+        LoginBulkPayload decoded = LoginBulkPayloadCodec.decode(encoded).orElseThrow();
+
+        assertEquals("betterquesting:login_name", payload.id());
+        assertEquals(1, payload.version());
+        assertEquals(payload, decoded);
+        assertEquals(new LoginNameSnapshot(PLAYER_ID, "Alice"), decoded.name());
+        assertTrue(encoded.length <= LoginBulkPayloadCodec.MAX_ENCODED_BYTES);
+    }
+
+    @Test
+    void nameEnvelopeRejectsUnknownVersionMalformedNbtAndEnvelopeTrailingData() {
+        byte[] encoded = LoginBulkPayloadCodec.encode(LoginBulkPayload.name(
+            new LoginNameSnapshot(PLAYER_ID, "Alice")));
+        int idLength = Byte.toUnsignedInt(encoded[Integer.BYTES + 1]);
+        int payloadVersionOffset = ID_OFFSET + idLength;
+        int bodyLengthOffset = payloadVersionOffset + 1;
+        int bodyOffset = bodyLengthOffset + Integer.BYTES;
+
+        byte[] wrongVersion = encoded.clone();
+        wrongVersion[payloadVersionOffset]++;
+        assertTrue(LoginBulkPayloadCodec.decode(wrongVersion).isEmpty());
+
+        byte[] malformedNbt = encoded.clone();
+        malformedNbt[bodyOffset] = 0;
+        assertTrue(LoginBulkPayloadCodec.decode(malformedNbt).isEmpty());
+
+        byte[] trailing = Arrays.copyOf(encoded, encoded.length + 1);
+        ByteBuffer.wrap(trailing).putInt(bodyLengthOffset, encoded.length - bodyOffset + 1);
+        assertTrue(LoginBulkPayloadCodec.decode(trailing).isEmpty());
     }
 
     @Test
