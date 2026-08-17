@@ -57,6 +57,8 @@ public final class LoginSyncServerWiring {
         (recipient, packet) -> Network.sendToClient((ServerPlayer) recipient, packet),
         (serverOwner, handler, recipient) -> LoginSettingsSnapshot.capture(QuestSettings.INSTANCE),
         (serverOwner, handler, recipient) -> List.of(),
+        (serverOwner, handler, recipient) -> CommonBootstrap.captureLoginChapterSnapshot(
+            serverOwner, handler, recipient).map(LoginBulkPayload::chapter),
         LoginSyncServerWiring::captureProductionLifePayload,
         (serverOwner, handler, recipient) -> CommonBootstrap.captureLoginNameSnapshot(
             serverOwner, handler, recipient).map(LoginBulkPayload::name),
@@ -67,6 +69,7 @@ public final class LoginSyncServerWiring {
     private final Sender sender;
     private final SettingsCapture settingsCapture;
     private final BulkPayloadSource bulkPayloadSource;
+    private final TypedBulkPayloadSource requiredChapterPayloadSource;
     private final TypedBulkPayloadSource typedBulkPayloadSource;
     private final TypedBulkPayloadSource requiredNamePayloadSource;
     private final FragmentAssemblyLimits fragmentLimits;
@@ -79,6 +82,7 @@ public final class LoginSyncServerWiring {
             (serverOwner, handler, recipient) ->
                 LoginSettingsSnapshot.capture(QuestSettings.INSTANCE),
             (serverOwner, handler, recipient) -> List.of(),
+            null,
             (serverOwner, handler, recipient) -> Optional.empty(),
             null,
             LoginSyncProtocol.FRAGMENT_LIMITS);
@@ -96,6 +100,7 @@ public final class LoginSyncServerWiring {
             sender,
             settingsCapture,
             bulkPayloadSource,
+            null,
             (serverOwner, handler, recipient) -> Optional.empty(),
             null,
             fragmentLimits);
@@ -114,6 +119,7 @@ public final class LoginSyncServerWiring {
             sender,
             settingsCapture,
             bulkPayloadSource,
+            null,
             typedBulkPayloadSource,
             null,
             fragmentLimits);
@@ -128,10 +134,32 @@ public final class LoginSyncServerWiring {
         TypedBulkPayloadSource requiredNamePayloadSource,
         FragmentAssemblyLimits fragmentLimits
     ) {
+        this(
+            owner,
+            sender,
+            settingsCapture,
+            bulkPayloadSource,
+            null,
+            typedBulkPayloadSource,
+            requiredNamePayloadSource,
+            fragmentLimits);
+    }
+
+    LoginSyncServerWiring(
+        LoginSyncConnectionOwner owner,
+        Sender sender,
+        SettingsCapture settingsCapture,
+        BulkPayloadSource bulkPayloadSource,
+        TypedBulkPayloadSource requiredChapterPayloadSource,
+        TypedBulkPayloadSource typedBulkPayloadSource,
+        TypedBulkPayloadSource requiredNamePayloadSource,
+        FragmentAssemblyLimits fragmentLimits
+    ) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.sender = Objects.requireNonNull(sender, "sender");
         this.settingsCapture = Objects.requireNonNull(settingsCapture, "settingsCapture");
         this.bulkPayloadSource = Objects.requireNonNull(bulkPayloadSource, "bulkPayloadSource");
+        this.requiredChapterPayloadSource = requiredChapterPayloadSource;
         this.typedBulkPayloadSource = Objects.requireNonNull(
             typedBulkPayloadSource, "typedBulkPayloadSource");
         this.requiredNamePayloadSource = requiredNamePayloadSource;
@@ -283,6 +311,16 @@ public final class LoginSyncServerWiring {
         List<byte[]> payloads = Objects.requireNonNull(
             bulkPayloadSource.capture(serverOwner, handler, recipient),
             "bulkPayloadSource returned null");
+        Optional<LoginBulkPayload> requiredChapterPayload = Optional.empty();
+        if (requiredChapterPayloadSource != null) {
+            requiredChapterPayload = Objects.requireNonNull(
+                requiredChapterPayloadSource.capture(serverOwner, handler, recipient),
+                "required chapter payload source returned null");
+            if (requiredChapterPayload.isEmpty()
+                || requiredChapterPayload.orElseThrow().chapter() == null) {
+                throw new IllegalStateException("required login chapter payload is unavailable");
+            }
+        }
         Optional<LoginBulkPayload> typedPayload = Objects.requireNonNull(
             typedBulkPayloadSource.capture(serverOwner, handler, recipient),
             "typedBulkPayloadSource returned null");
@@ -299,7 +337,8 @@ public final class LoginSyncServerWiring {
                 throw new IllegalStateException("required login name payload is unavailable");
             }
         }
-        int typedPayloadCount = (typedPayload.isPresent() ? 1 : 0)
+        int typedPayloadCount = (requiredChapterPayload.isPresent() ? 1 : 0)
+            + (typedPayload.isPresent() ? 1 : 0)
             + (requiredNamePayload.isPresent() ? 1 : 0);
         if (payloads.size() > fragmentLimits.maxTrackedTransferIds() - typedPayloadCount) {
             throw new IllegalArgumentException("bulk payload source exceeds tracked transfer bound");
@@ -308,6 +347,7 @@ public final class LoginSyncServerWiring {
 
         List<byte[]> encodedPayloads = new ArrayList<>(payloadCount);
         encodedPayloads.addAll(payloads);
+        requiredChapterPayload.map(LoginBulkPayloadCodec::encode).ifPresent(encodedPayloads::add);
         typedPayload.map(LoginBulkPayloadCodec::encode).ifPresent(encodedPayloads::add);
         requiredNamePayload.map(LoginBulkPayloadCodec::encode).ifPresent(encodedPayloads::add);
 

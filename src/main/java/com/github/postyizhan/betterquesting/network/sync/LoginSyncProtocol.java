@@ -8,7 +8,7 @@ import com.github.postyizhan.betterquesting.network.handshake.HandshakeLimits;
 
 public final class LoginSyncProtocol {
     public static final int PROTOCOL_VERSION = 1;
-    public static final int DATA_FORMAT_VERSION = 3;
+    public static final int DATA_FORMAT_VERSION = 4;
     public static final int LOGIN_FRAME_HEADER_BYTES = Integer.BYTES + 3
         + Long.BYTES * 2 + Integer.BYTES;
     public static final int FRAGMENT_WIRE_HEADER_BYTES = QuestingFragmentCodec.HEADER_BYTES;

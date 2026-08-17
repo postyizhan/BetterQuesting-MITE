@@ -4,6 +4,7 @@ import com.github.postyizhan.betterquesting.BetterQuestingMod;
 import com.github.postyizhan.betterquesting.core.BetterQuestingConstants;
 import com.github.postyizhan.betterquesting.core.storage.json.JsonDocumentStore;
 import com.github.postyizhan.betterquesting.network.probe.ProbePackets;
+import com.github.postyizhan.betterquesting.network.sync.LoginChapterSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginNameSnapshot;
 import com.github.postyizhan.betterquesting.platform.api.DirtyPlayerSink;
 import com.github.postyizhan.betterquesting.platform.api.PlayerIdentityResolution;
@@ -160,6 +161,52 @@ public final class CommonBootstrap {
             return Optional.empty();
         }
         return LoginNameSnapshot.capture(names, identity.id(), reportedName);
+    }
+
+    static Optional<LoginChapterSnapshot> captureLoginChapterSnapshot(
+        Object serverOwner,
+        Object handler,
+        Object recipient
+    ) {
+        if (!(serverOwner instanceof MinecraftServer server)
+            || !(handler instanceof NetServerHandler netHandler)
+            || !(recipient instanceof ServerPlayer player)
+            || netHandler.playerEntity != player
+            || player.mcServer != server
+            || player.playerNetServerHandler != netHandler
+            || questDatabaseServer != server
+            || questDatabaseLifecycle == null) {
+            return Optional.empty();
+        }
+        return captureLoginChapterSnapshot(
+            server,
+            handler,
+            player.mcServer,
+            player.playerNetServerHandler,
+            questDatabaseServer,
+            questDatabaseLifecycle,
+            QuestLineDatabase.INSTANCE);
+    }
+
+    static Optional<LoginChapterSnapshot> captureLoginChapterSnapshot(
+        Object serverOwner,
+        Object handler,
+        Object playerServer,
+        Object playerHandler,
+        Object databaseServer,
+        Object activeLifecycle,
+        QuestLineDatabase chapters
+    ) {
+        if (serverOwner == null || handler == null
+            || playerServer != serverOwner || playerHandler != handler
+            || databaseServer != serverOwner || activeLifecycle == null || chapters == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(LoginChapterSnapshot.capture(chapters));
+        } catch (RuntimeException invalidDatabase) {
+            return Optional.empty();
+        }
     }
 
     private static void loadQuestLoot(MinecraftServer server) {

@@ -13,14 +13,18 @@ public final class LoginBulkPayloadCodec {
     private static final int MAGIC = 0x42514c50;
     private static final int ENVELOPE_VERSION = 1;
     private static final int MAX_ID_BYTES = 64;
+    private static final byte[] CHAPTER_ID = LoginChapterSnapshot.FORMAT_ID.getBytes(
+        StandardCharsets.UTF_8);
     private static final byte[] LIFE_ID = LoginLifeSnapshot.FORMAT_ID.getBytes(
         StandardCharsets.UTF_8);
     private static final byte[] NAME_ID = LoginNameSnapshot.FORMAT_ID.getBytes(
         StandardCharsets.UTF_8);
     private static final int FIXED_BYTES = Integer.BYTES + 1 + 1 + 1 + Integer.BYTES;
     public static final int MAX_ENCODED_BYTES = FIXED_BYTES + Math.max(
-        LIFE_ID.length + LoginLifeSnapshotCodec.MAX_ENCODED_BYTES,
-        NAME_ID.length + LoginNameSnapshotCodec.MAX_ENCODED_BYTES);
+        CHAPTER_ID.length + LoginChapterSnapshotCodec.MAX_ENCODED_BYTES,
+        Math.max(
+            LIFE_ID.length + LoginLifeSnapshotCodec.MAX_ENCODED_BYTES,
+            NAME_ID.length + LoginNameSnapshotCodec.MAX_ENCODED_BYTES));
 
     private LoginBulkPayloadCodec() {
     }
@@ -29,7 +33,10 @@ public final class LoginBulkPayloadCodec {
         Objects.requireNonNull(payload, "payload");
         byte[] id;
         byte[] body;
-        if (payload.life() != null) {
+        if (payload.chapter() != null) {
+            id = CHAPTER_ID;
+            body = LoginChapterSnapshotCodec.encode(payload.chapter());
+        } else if (payload.life() != null) {
             id = LIFE_ID;
             body = LoginLifeSnapshotCodec.encode(payload.life());
         } else {
@@ -71,7 +78,10 @@ public final class LoginBulkPayloadCodec {
             input.position(input.position() + idLength);
             int expectedVersion;
             int maximumBodyLength;
-            if (LoginLifeSnapshot.FORMAT_ID.equals(id)) {
+            if (LoginChapterSnapshot.FORMAT_ID.equals(id)) {
+                expectedVersion = LoginChapterSnapshot.FORMAT_VERSION;
+                maximumBodyLength = LoginChapterSnapshotCodec.MAX_ENCODED_BYTES;
+            } else if (LoginLifeSnapshot.FORMAT_ID.equals(id)) {
                 expectedVersion = LoginLifeSnapshot.FORMAT_VERSION;
                 maximumBodyLength = LoginLifeSnapshotCodec.MAX_ENCODED_BYTES;
             } else if (LoginNameSnapshot.FORMAT_ID.equals(id)) {
@@ -92,6 +102,9 @@ public final class LoginBulkPayloadCodec {
             }
             byte[] body = new byte[bodyLength];
             input.get(body);
+            if (LoginChapterSnapshot.FORMAT_ID.equals(id)) {
+                return LoginChapterSnapshotCodec.decode(body).map(LoginBulkPayload::chapter);
+            }
             return LoginLifeSnapshot.FORMAT_ID.equals(id)
                 ? LoginLifeSnapshotCodec.decode(body).map(LoginBulkPayload::life)
                 : LoginNameSnapshotCodec.decode(body).map(LoginBulkPayload::name);

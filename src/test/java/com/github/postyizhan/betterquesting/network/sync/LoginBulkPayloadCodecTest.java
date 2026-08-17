@@ -4,9 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.postyizhan.betterquesting.api.enums.EnumQuestVisibility;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -45,6 +47,29 @@ class LoginBulkPayloadCodecTest {
         assertEquals(1, payload.version());
         assertEquals(payload, decoded);
         assertEquals(new LoginNameSnapshot(PLAYER_ID, "Alice"), decoded.name());
+        assertTrue(encoded.length <= LoginBulkPayloadCodec.MAX_ENCODED_BYTES);
+    }
+
+    @Test
+    void chapterVariantUsesTheExactTypedEnvelopeAndAuditedTransferBounds() {
+        LoginChapterSnapshot snapshot = new LoginChapterSnapshot(List.of(
+            new LoginChapterSnapshot.Chapter(
+                UUID.fromString("00000000-0000-0000-0000-000000000011"),
+                "Chapter",
+                "Description",
+                EnumQuestVisibility.NORMAL,
+                "background.png",
+                256,
+                List.of(new LoginChapterSnapshot.Node(
+                    UUID.fromString("00000000-0000-0000-0000-000000000012"),
+                    1, 2, 3, 4)))));
+
+        byte[] encoded = LoginBulkPayloadCodec.encode(LoginBulkPayload.chapter(snapshot));
+        LoginBulkPayload decoded = LoginBulkPayloadCodec.decode(encoded).orElseThrow();
+
+        assertEquals("betterquesting:login_chapter", decoded.id());
+        assertEquals(snapshot, decoded.chapter());
+        assertEquals(8_388_583, LoginBulkPayloadCodec.MAX_ENCODED_BYTES);
         assertTrue(encoded.length <= LoginBulkPayloadCodec.MAX_ENCODED_BYTES);
     }
 

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.postyizhan.betterquesting.client.state.ClientChapterState;
 import com.github.postyizhan.betterquesting.client.state.ClientLifeState;
 import com.github.postyizhan.betterquesting.client.state.ClientPlayerNameState;
 import com.github.postyizhan.betterquesting.client.state.ClientQuestSettingsState;
@@ -19,6 +20,7 @@ import com.github.postyizhan.betterquesting.network.handshake.HandshakeCapabilit
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
 import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayload;
 import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayloadCodec;
+import com.github.postyizhan.betterquesting.network.sync.LoginChapterSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginLifeSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginNameSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
@@ -248,6 +250,48 @@ public class LoginSyncClientWiringTest {
         assertTrue(wiring.currentOrchestrator(handler).isEmpty());
         assertTrue(settings.current().isEmpty());
         assertTrue(life.current().isEmpty());
+    }
+
+    @Test
+    void chapterCandidatePublishesInOneSwapAndConflictClearsEveryConnectionLease() {
+        ClientQuestSettingsState settings = new ClientQuestSettingsState();
+        ClientChapterState chapters = new ClientChapterState();
+        ClientLifeState life = new ClientLifeState();
+        ClientPlayerNameState names = new ClientPlayerNameState();
+        FragmentAssemblyLimits limits = chapterLimits();
+        LoginSyncClientWiring wiring = new LoginSyncClientWiring(
+            settings, chapters, life, names, () -> { }, packet -> { }, limits);
+        Object handler = new Object();
+        LoginSyncFrame hello = readyTypedClient(wiring, handler, "chapter-client");
+        LoginChapterSnapshot first = new LoginChapterSnapshot(List.of());
+
+        sendBulk(wiring, handler, hello.connectionToken(), limits,
+            91L, chapterEnvelope(first), 0L);
+        LoginChapterSnapshot firstPublished = chapters.current().orElseThrow();
+        sendBulk(wiring, handler, hello.connectionToken(), limits,
+            92L, chapterEnvelope(first), 20L);
+        sendBulk(wiring, handler, hello.connectionToken(), limits,
+            93L, lifeEnvelope(4), 40L);
+        sendBulk(wiring, handler, hello.connectionToken(), limits,
+            94L, nameEnvelope(new LoginNameSnapshot(AUTHORITATIVE_ID, "Alice")), 60L);
+
+        assertSame(firstPublished, chapters.current().orElseThrow());
+        assertEquals(4, life.current().orElseThrow().lives());
+        assertEquals("Alice", names.current().orElseThrow().displayName());
+
+        LoginChapterSnapshot conflict = new LoginChapterSnapshot(List.of(
+            new LoginChapterSnapshot.Chapter(
+                UUID.fromString("00000000-0000-0000-0000-000000000052"),
+                "Conflict", "", com.github.postyizhan.betterquesting.api.enums.EnumQuestVisibility.NORMAL,
+                "", 256, List.of())));
+        sendBulk(wiring, handler, hello.connectionToken(), limits,
+            95L, chapterEnvelope(conflict), 80L);
+
+        assertTrue(wiring.currentOrchestrator(handler).isEmpty());
+        assertTrue(settings.current().isEmpty());
+        assertTrue(chapters.current().isEmpty());
+        assertTrue(life.current().isEmpty());
+        assertTrue(names.current().isEmpty());
     }
 
     @Test
@@ -1009,6 +1053,10 @@ public class LoginSyncClientWiringTest {
         return new FragmentAssemblyLimits(7, 128, 20, 2, 4_096L, 8, 10L);
     }
 
+    private static FragmentAssemblyLimits chapterLimits() {
+        return new FragmentAssemblyLimits(16, 512, 32, 2, 8_192L, 8, 10L);
+    }
+
     private static byte[] lifeEnvelope(int lives) {
         return LoginBulkPayloadCodec.encode(
             LoginBulkPayload.life(new LoginLifeSnapshot(lives)));
@@ -1016,6 +1064,10 @@ public class LoginSyncClientWiringTest {
 
     private static byte[] nameEnvelope(LoginNameSnapshot snapshot) {
         return LoginBulkPayloadCodec.encode(LoginBulkPayload.name(snapshot));
+    }
+
+    private static byte[] chapterEnvelope(LoginChapterSnapshot snapshot) {
+        return LoginBulkPayloadCodec.encode(LoginBulkPayload.chapter(snapshot));
     }
 
     private static LoginSyncFrame readyTypedClient(

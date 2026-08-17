@@ -1,6 +1,7 @@
 package com.github.postyizhan.betterquesting.platform.fml.client;
 
 import com.github.postyizhan.betterquesting.BetterQuestingMod;
+import com.github.postyizhan.betterquesting.client.state.ClientChapterState;
 import com.github.postyizhan.betterquesting.client.state.ClientLifeState;
 import com.github.postyizhan.betterquesting.client.state.ClientPlayerNameState;
 import com.github.postyizhan.betterquesting.client.state.ClientQuestSettingsState;
@@ -42,6 +43,7 @@ public final class LoginSyncClientWiring {
 
     private static final LoginSyncClientWiring PRODUCTION = new LoginSyncClientWiring(
         ClientQuestSettingsState.INSTANCE,
+        ClientChapterState.INSTANCE,
         ClientLifeState.INSTANCE,
         ClientPlayerNameState.INSTANCE,
         () -> LoginSyncTransportPackets.registerClient(LoginSyncClientWiring::receiveFromRic),
@@ -69,6 +71,7 @@ public final class LoginSyncClientWiring {
     private final Sender sender;
     private final FragmentAssemblyLimits fragmentLimits;
     private final LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication;
+    private final ClientChapterState chapterState;
     private final ClientLifeState lifeState;
     private final ClientPlayerNameState nameState;
     private final IdentityHashMap<Object, Binding> bindings = new IdentityHashMap<>();
@@ -107,6 +110,7 @@ public final class LoginSyncClientWiring {
 
     LoginSyncClientWiring(
         ClientQuestSettingsState settingsState,
+        ClientChapterState chapterState,
         ClientLifeState lifeState,
         ClientPlayerNameState nameState,
         Runnable readerRegistration,
@@ -119,6 +123,26 @@ public final class LoginSyncClientWiring {
             sender,
             fragmentLimits,
             null,
+            Objects.requireNonNull(chapterState, "chapterState"),
+            Objects.requireNonNull(lifeState, "lifeState"),
+            Objects.requireNonNull(nameState, "nameState"));
+    }
+
+    LoginSyncClientWiring(
+        ClientQuestSettingsState settingsState,
+        ClientLifeState lifeState,
+        ClientPlayerNameState nameState,
+        Runnable readerRegistration,
+        Sender sender,
+        FragmentAssemblyLimits fragmentLimits
+    ) {
+        this(
+            settingsOwner(settingsState),
+            readerRegistration,
+            sender,
+            fragmentLimits,
+            null,
+            new ClientChapterState(),
             Objects.requireNonNull(lifeState, "lifeState"),
             Objects.requireNonNull(nameState, "nameState"));
     }
@@ -135,6 +159,7 @@ public final class LoginSyncClientWiring {
             LoginSyncProtocol.FRAGMENT_LIMITS,
             ignored -> { },
             null,
+            null,
             null);
     }
 
@@ -145,7 +170,7 @@ public final class LoginSyncClientWiring {
         FragmentAssemblyLimits fragmentLimits,
         LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication
     ) {
-        this(owner, readerRegistration, sender, fragmentLimits, bulkPublication, null, null);
+        this(owner, readerRegistration, sender, fragmentLimits, bulkPublication, null, null, null);
     }
 
     private LoginSyncClientWiring(
@@ -154,6 +179,7 @@ public final class LoginSyncClientWiring {
         Sender sender,
         FragmentAssemblyLimits fragmentLimits,
         LoginSyncBulkSyncOrchestrator.PayloadPublication bulkPublication,
+        ClientChapterState chapterState,
         ClientLifeState lifeState,
         ClientPlayerNameState nameState
     ) {
@@ -166,6 +192,7 @@ public final class LoginSyncClientWiring {
             throw new NullPointerException("bulkPublication");
         }
         this.bulkPublication = bulkPublication;
+        this.chapterState = chapterState;
         this.lifeState = lifeState;
         this.nameState = nameState;
         if (owner.role() != LoginSyncSession.Role.CLIENT) {
@@ -241,11 +268,13 @@ public final class LoginSyncClientWiring {
             session = owner.bind(handler);
             LoginSyncBulkSyncOrchestrator.PayloadPublication publication = bulkPublication;
             if (lifeState != null) {
+                ClientChapterState.ConnectionLease chapterLease = chapterState.openConnectionLease();
                 ClientLifeState.ConnectionLease lifeLease = lifeState.openConnectionLease();
                 ClientPlayerNameState.ConnectionLease nameLease = nameState.openConnectionLease();
+                session.addCloseHook(chapterLease::close);
                 session.addCloseHook(lifeLease::close);
                 session.addCloseHook(nameLease::close);
-                publication = payload -> publishTyped(lifeLease, nameLease, payload);
+                publication = payload -> publishTyped(chapterLease, lifeLease, nameLease, payload);
             }
             LoginSyncBulkSyncOrchestrator orchestrator = new LoginSyncBulkSyncOrchestrator(
                 session, fragmentLimits, publication);
@@ -274,13 +303,16 @@ public final class LoginSyncClientWiring {
     }
 
     private static void publishTyped(
+        ClientChapterState.ConnectionLease chapterLease,
         ClientLifeState.ConnectionLease lifeLease,
         ClientPlayerNameState.ConnectionLease nameLease,
         byte[] encoded
     ) {
         LoginBulkPayload payload = LoginBulkPayloadCodec.decode(encoded).orElseThrow(
             () -> new IllegalArgumentException("invalid typed login bulk payload"));
-        if (payload.life() != null) {
+        if (payload.chapter() != null) {
+            chapterLease.publish(payload.chapter());
+        } else if (payload.life() != null) {
             lifeLease.publish(payload.life());
         } else {
             nameLease.publish(payload.name());

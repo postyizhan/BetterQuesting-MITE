@@ -14,6 +14,7 @@ import com.github.postyizhan.betterquesting.network.handshake.HandshakeCapabilit
 import com.github.postyizhan.betterquesting.network.handshake.HandshakeHello;
 import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayload;
 import com.github.postyizhan.betterquesting.network.sync.LoginBulkPayloadCodec;
+import com.github.postyizhan.betterquesting.network.sync.LoginChapterSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginLifeSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginNameSnapshot;
 import com.github.postyizhan.betterquesting.network.sync.LoginSettingsSnapshot;
@@ -45,12 +46,15 @@ class LoginSyncServerWiringTest {
     @Test
     void protocolVersionOneClaimsNoFeatures() {
         assertEquals(1, LoginSyncProtocol.CAPABILITIES.protocolVersion());
-        assertEquals(3, LoginSyncProtocol.CAPABILITIES.dataFormatVersion());
+        assertEquals(4, LoginSyncProtocol.CAPABILITIES.dataFormatVersion());
         assertEquals(0L, LoginSyncProtocol.CAPABILITIES.supportedFeatureBits());
         assertEquals(0L, LoginSyncProtocol.CAPABILITIES.requiredFeatureBits());
         assertEquals(0L, LoginSyncProtocol.LIMITS.knownFeatureBits());
         assertEquals(0L, LoginSyncProtocol.LIMITS.reservedFeatureBits());
         assertEquals(32766, LoginSyncProtocol.MAX_BULK_FRAME_BYTES);
+        assertEquals(32710, LoginSyncProtocol.MAX_FRAGMENT_BYTES);
+        assertEquals(8_388_608, LoginSyncProtocol.MAX_TRANSFER_BYTES);
+        assertEquals(257, LoginSyncProtocol.MAX_FRAGMENTS_PER_TRANSFER);
         assertEquals(
             LoginSyncProtocol.MAX_BULK_FRAME_BYTES,
             LoginSyncProtocol.LOGIN_FRAME_HEADER_BYTES
@@ -117,6 +121,75 @@ class LoginSyncServerWiringTest {
         assertEquals(new LoginLifeSnapshot(7), firstTyped.life());
         assertEquals(name, lastTyped.name());
         assertEquals("betterquesting:login_name", lastTyped.id());
+    }
+
+    @Test
+    void requiredChapterIsSentBetweenSettingsAndOptionalLifeAndDuplicateHelloReplaysIt() {
+        LoginSyncConnectionOwner owner = owner(LoginSyncSession.Role.SERVER);
+        List<LoginSyncFrame> sent = new ArrayList<>();
+        AtomicInteger chapterCaptures = new AtomicInteger();
+        LoginChapterSnapshot chapter = new LoginChapterSnapshot(List.of());
+        LoginNameSnapshot name = new LoginNameSnapshot(PLAYER_ID, "Alice");
+        LoginSyncServerWiring wiring = new LoginSyncServerWiring(
+            owner,
+            (recipient, packet) -> sent.add(LoginSyncTransportPackets.extract(packet).orElseThrow()),
+            (server, handler, recipient) -> snapshot("chapter-order"),
+            (server, handler, recipient) -> List.of(),
+            (server, handler, recipient) -> {
+                chapterCaptures.incrementAndGet();
+                return Optional.of(LoginBulkPayload.chapter(chapter));
+            },
+            (server, handler, recipient) -> Optional.of(
+                LoginBulkPayload.life(new LoginLifeSnapshot(7))),
+            (server, handler, recipient) -> Optional.of(LoginBulkPayload.name(name)),
+            LoginSyncProtocol.FRAGMENT_LIMITS);
+        Object server = new Object();
+        Object handler = new Object();
+        LoginSyncFrame hello = LoginSyncFrame.clientHello(
+            new HandshakeHello(TOKEN, LoginSyncProtocol.CAPABILITIES));
+
+        wiring.bind(server, handler);
+        wiring.receive(server, handler, new Object(), hello);
+        List<LoginSyncFrame> first = List.copyOf(sent);
+        wiring.receive(server, handler, new Object(), hello);
+
+        assertEquals(5, first.size());
+        assertEquals(LoginSyncFrame.Type.SERVER_HELLO, first.get(0).type());
+        assertEquals(LoginSyncFrame.Type.SETTINGS, first.get(1).type());
+        assertEquals(chapter, decodeSingleFragment(first.get(2)).chapter());
+        assertEquals(new LoginLifeSnapshot(7), decodeSingleFragment(first.get(3)).life());
+        assertEquals(name, decodeSingleFragment(first.get(4)).name());
+        assertEquals(1, chapterCaptures.get());
+        assertEquals(first, sent.subList(first.size(), sent.size()));
+    }
+
+    @Test
+    void missingOrFailingRequiredChapterSendsNothingAndClosesOnlyThatBinding() {
+        Object server = new Object();
+        Object failedHandler = new Object();
+        Object healthyHandler = new Object();
+        LoginSyncConnectionOwner owner = owner(LoginSyncSession.Role.SERVER);
+        List<LoginSyncFrame> sent = new ArrayList<>();
+        LoginSyncServerWiring wiring = new LoginSyncServerWiring(
+            owner,
+            (recipient, packet) -> sent.add(LoginSyncTransportPackets.extract(packet).orElseThrow()),
+            (serverOwner, handler, recipient) -> snapshot("chapter-failure"),
+            (serverOwner, handler, recipient) -> List.of(),
+            (serverOwner, handler, recipient) -> Optional.empty(),
+            (serverOwner, handler, recipient) -> Optional.empty(),
+            (serverOwner, handler, recipient) -> Optional.of(LoginBulkPayload.name(
+                new LoginNameSnapshot(PLAYER_ID, "Alice"))),
+            LoginSyncProtocol.FRAGMENT_LIMITS);
+        wiring.bind(server, failedHandler);
+        wiring.bind(server, healthyHandler);
+        LoginSyncSession healthy = owner.current(server, healthyHandler).orElseThrow();
+
+        wiring.receive(server, failedHandler, new Object(), LoginSyncFrame.clientHello(
+            new HandshakeHello(TOKEN, LoginSyncProtocol.CAPABILITIES)));
+
+        assertTrue(sent.isEmpty());
+        assertTrue(owner.current(server, failedHandler).isEmpty());
+        assertSame(healthy, owner.current(server, healthyHandler).orElseThrow());
     }
 
     @Test
